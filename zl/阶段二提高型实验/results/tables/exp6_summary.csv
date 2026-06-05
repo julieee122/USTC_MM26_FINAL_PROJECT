@@ -1,0 +1,6 @@
+﻿metric,value
+coexist_count,361
+tilt_count,355
+lockin_count,1885
+diagonal_tilt_threshold_k,0.9
+diagonal_lockin_threshold_k,1.2000000000000002
