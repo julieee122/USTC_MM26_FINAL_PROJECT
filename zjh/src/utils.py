@@ -50,18 +50,44 @@ def save_timeseries_csv(result, path: str):
             writer.writerow([result[k][i] for k in keys])
 
 
+from src.metrics import (
+    concentration,
+    combined_share,
+    lock_in_index,
+    market_state,
+    directional_market_state,
+)
+
+
 def summarize_result(name: str, result):
     """
-    汇总一条策略轨迹的最终份额、成本收益、供给不足等指标。
+    汇总一条策略轨迹的最终份额、市场状态、成本收益、供给不足等指标。
     """
+    final_x = float(result["x"][-1])
+    final_y = float(result["y"][-1])
+
+    c = concentration(final_x, final_y)
+    l_a = combined_share(final_x, final_y)
+    lock_index = lock_in_index(final_x, final_y)
+
     return {
         "name": name,
-        "final_x": float(result["x"][-1]),
-        "final_y": float(result["y"][-1]),
+
+        "final_x": final_x,
+        "final_y": final_y,
+
+        "combined_share": l_a,
+        "concentration": c,
+        "lock_in_index": lock_index,
+        "market_state": market_state(c),
+        "directional_state": directional_market_state(final_x, final_y),
+
         "final_q_u": float(result["q_u"][-1]),
         "final_q_m": float(result["q_m"][-1]),
+
         "avg_shortage_A": float(np.mean(result["shortage_A"])),
         "max_shortage_A": float(np.max(result["shortage_A"])),
+
         "cum_revenue": float(result["cum_revenue"][-1]),
         "cum_subsidy_cost": float(result["cum_subsidy_cost"][-1]),
         "cum_invest_cost": float(result["cum_invest_cost"][-1]),
