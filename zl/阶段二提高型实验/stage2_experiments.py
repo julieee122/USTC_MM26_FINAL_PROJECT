@@ -107,9 +107,9 @@ def exp6_lockin_region(params: PlatformParams, fig_dir: Path, table_dir: Path) -
 
 
 def exp7_reversal_threshold(params: PlatformParams, fig_dir: Path, table_dir: Path) -> None:
-    network_strengths = [0.5, 1.0, 2.0, 3.0, 4.0]
+    network_strengths = [0.3, 0.8, 1.5]
     switching_costs = [0.0, 0.5, 1.0, 1.5]
-    dq_values = np.linspace(0, 5, 101)
+    dq_values = np.round(np.arange(0.0, 1.5 + 0.01, 0.01), 2)
     threshold_grid = np.full((len(switching_costs), len(network_strengths)), np.nan)
     rows = []
 
@@ -119,37 +119,32 @@ def exp7_reversal_threshold(params: PlatformParams, fig_dir: Path, table_dir: Pa
             u_star = np.nan
             m_star = np.nan
             for dq in dq_values:
-                p = params.with_updates(alpha=k, beta=k, sU=s, sM=s, qAU=float(dq), qAM=float(dq), qBU=0.0, qBM=0.0)
-                u_inf, m_inf = run_final_state(p, u0=0.3, m0=0.3)
-                if u_inf > 0.5 and m_inf > 0.5:
+                p = params.with_updates(alpha=k, beta=k, sU=s, sM=s, qAU=0.0, qAM=0.0, qBU=float(dq), qBM=float(dq))
+                u_inf, m_inf = run_final_state(p, u0=0.8, m0=0.8)
+                if u_inf < 0.5 and m_inf < 0.5:
                     q_star = float(dq)
                     u_star = u_inf
                     m_star = m_inf
                     break
             threshold_grid[i, j] = q_star
-            rows.append([k, s, q_star, u_star, m_star])
+            rows.append([k, s, q_star, u_star, m_star, 1.0 - u_star if not np.isnan(u_star) else np.nan, 1.0 - m_star if not np.isnan(m_star) else np.nan])
 
     plt.figure(figsize=(7.2, 5.2))
     masked = np.ma.masked_invalid(threshold_grid)
-    im = plt.imshow(masked, origin="lower", aspect="auto", cmap="magma_r", extent=[0.25, 4.25, -0.25, 1.75], vmin=0, vmax=5)
+    im = plt.imshow(masked, origin="lower", aspect="auto", cmap="magma_r", extent=[0.05, 1.75, -0.25, 1.75], vmin=0, vmax=1.5)
     plt.colorbar(im, label="最小质量优势 Δq*")
     plt.xticks(network_strengths)
     plt.yticks(switching_costs)
     plt.xlabel("网络效应强度 k = alpha = beta")
     plt.ylabel("切换成本 s = sU = sM")
-    plt.title("实验7：逆袭阈值受网络效应和切换成本影响")
-    for i, s in enumerate(switching_costs):
-        for j, k in enumerate(network_strengths):
-            text = "无" if np.isnan(threshold_grid[i, j]) else f"{threshold_grid[i, j]:.2f}"
-            plt.text(k, s, text, ha="center", va="center", color="white" if not np.isnan(threshold_grid[i, j]) and threshold_grid[i, j] > 2.5 else "black", fontsize=8)
     save_figure(fig_dir / "exp7_reversal_threshold_heatmap.png")
 
-    _write_csv(table_dir / "exp7_reversal_thresholds.csv", ["network_strength", "switching_cost", "delta_q_star", "u_at_star", "m_at_star"], rows)
+    _write_csv(table_dir / "exp7_reversal_thresholds.csv", ["network_strength", "switching_cost", "delta_q_star", "u_A_at_star", "m_A_at_star", "u_B_at_star", "m_B_at_star"], rows)
 
 
 def exp8_subsidy_allocation(params: PlatformParams, fig_dir: Path, table_dir: Path) -> None:
     rhos = np.linspace(0, 1, 101)
-    budgets = np.round(np.arange(0.5, 3.01, 0.1), 2)
+    budgets = np.round(np.arange(0.0, 1.51, 0.05), 2)
     rows = []
     l_grid = np.zeros((len(budgets), len(rhos)))
 
@@ -159,17 +154,17 @@ def exp8_subsidy_allocation(params: PlatformParams, fig_dir: Path, table_dir: Pa
         for j, rho in enumerate(rhos):
             b_u = float(rho * budget)
             b_m = float((1.0 - rho) * budget)
-            p = params.with_updates(alpha=3.0, beta=3.0, bAU=b_u, bAM=b_m, bBU=0.0, bBM=0.0)
-            u_inf, m_inf = run_final_state(p, u0=0.3, m0=0.3)
-            l_a = combined_share(u_inf, m_inf)
+            p = params.with_updates(alpha=0.8, beta=0.8, bAU=0.0, bAM=0.0, bBU=b_u, bBM=b_m)
+            u_inf, m_inf = run_final_state(p, u0=0.8, m0=0.8, T=10.0)
+            l_b = 1.0 - combined_share(u_inf, m_inf)
             c = concentration(u_inf, m_inf)
-            values.append(l_a)
-            l_grid[i, j] = l_a
-            if l_a > best[0]:
-                best = (l_a, float(rho))
-            rows.append([budget, rho, b_u, b_m, u_inf, m_inf, l_a, c, directional_market_state(u_inf, m_inf)])
+            values.append(l_b)
+            l_grid[i, j] = l_b
+            if l_b > best[0]:
+                best = (l_b, float(rho))
+            rows.append([budget, rho, b_u, b_m, u_inf, m_inf, 1.0 - u_inf, 1.0 - m_inf, l_b, c, directional_market_state(u_inf, m_inf)])
 
-    selected_budgets = [1.4, 1.5, 1.6, 1.7, 1.8]
+    selected_budgets = [0.1, 0.15, 0.2, 0.3, 0.4]
     plt.figure(figsize=(8, 5))
     for budget in selected_budgets:
         idx = int(np.argmin(np.abs(budgets - budget)))
@@ -181,7 +176,7 @@ def exp8_subsidy_allocation(params: PlatformParams, fig_dir: Path, table_dir: Pa
             label = f"B={budgets[idx]:.1f}, 最优 rho={rhos[best_idx]:.2f}"
         plt.plot(rhos, l_grid[idx], label=label)
     plt.xlabel("用户补贴比例 rho")
-    plt.ylabel("平台 A 最终综合份额 L_A")
+    plt.ylabel("平台 B 最终平均份额 L_B")
     plt.title("实验8：临界预算附近的双边补贴分配")
     plt.ylim(0, 1.02)
     plt.grid(alpha=0.25)
@@ -190,18 +185,18 @@ def exp8_subsidy_allocation(params: PlatformParams, fig_dir: Path, table_dir: Pa
 
     plt.figure(figsize=(7.6, 5.4))
     im = plt.imshow(l_grid, origin="lower", extent=[0, 1, float(budgets[0]), float(budgets[-1])], aspect="auto", cmap="viridis", vmin=0, vmax=1)
-    plt.colorbar(im, label="最终综合份额 L_A")
+    plt.colorbar(im, label="最终平均份额 L_B")
     plt.xlabel("用户补贴比例 rho")
     plt.ylabel("总补贴预算 B")
     plt.title("实验8：预算与补贴比例的二维效果图")
     save_figure(fig_dir / "exp8_budget_rho_heatmap.png")
 
     scenario_rows = []
-    scenario_budget = 1.5
+    scenario_budget = 0.8
     scenarios = [
-        ("对称网络效应", 3.0, 3.0),
-        ("用户更依赖商户", 4.0, 2.0),
-        ("商户更依赖用户", 2.0, 4.0),
+        ("对称网络效应", 0.8, 0.8),
+        ("用户更依赖商户", 1.0, 0.6),
+        ("商户更依赖用户", 0.6, 1.0),
     ]
     plt.figure(figsize=(8, 5))
     for label, alpha, beta in scenarios:
@@ -210,28 +205,28 @@ def exp8_subsidy_allocation(params: PlatformParams, fig_dir: Path, table_dir: Pa
         for rho in rhos:
             b_u = float(rho * scenario_budget)
             b_m = float((1.0 - rho) * scenario_budget)
-            p = params.with_updates(alpha=alpha, beta=beta, bAU=b_u, bAM=b_m, bBU=0.0, bBM=0.0)
-            u_inf, m_inf = run_final_state(p, u0=0.3, m0=0.3)
-            l_a = combined_share(u_inf, m_inf)
+            p = params.with_updates(alpha=alpha, beta=beta, bAU=0.0, bAM=0.0, bBU=b_u, bBM=b_m)
+            u_inf, m_inf = run_final_state(p, u0=0.8, m0=0.8, T=10.0)
+            l_b = 1.0 - combined_share(u_inf, m_inf)
             c = concentration(u_inf, m_inf)
-            values.append(l_a)
-            if l_a > best[0]:
-                best = (l_a, float(rho), u_inf, m_inf, c)
-            scenario_rows.append([label, alpha, beta, scenario_budget, rho, b_u, b_m, u_inf, m_inf, l_a, c, directional_market_state(u_inf, m_inf)])
+            values.append(l_b)
+            if l_b > best[0]:
+                best = (l_b, float(rho), u_inf, m_inf, c)
+            scenario_rows.append([label, alpha, beta, scenario_budget, rho, b_u, b_m, u_inf, m_inf, 1.0 - u_inf, 1.0 - m_inf, l_b, c, directional_market_state(u_inf, m_inf)])
         plt.plot(rhos, values, label=f"{label}，最优 rho={best[1]:.2f}")
     plt.xlabel("用户补贴比例 rho")
-    plt.ylabel("平台 A 最终综合份额 L_A")
+    plt.ylabel("平台 B 最终平均份额 L_B")
     plt.title("实验8补充：不同网络效应结构下的补贴比例")
     plt.ylim(0, 1.02)
     plt.grid(alpha=0.25)
     plt.legend()
     save_figure(fig_dir / "exp8_network_scenario_allocation.png")
 
-    _write_csv(table_dir / "exp8_subsidy_allocation.csv", ["budget", "rho", "bAU", "bAM", "u_inf", "m_inf", "L_A", "C", "state"], rows)
+    _write_csv(table_dir / "exp8_subsidy_allocation.csv", ["budget", "rho", "bBU", "bBM", "u_A_inf", "m_A_inf", "u_B_inf", "m_B_inf", "L_B", "C", "state"], rows)
     _write_csv(table_dir / "exp8_budget_rho_grid.csv", [""] + [f"rho={rho:.2f}" for rho in rhos], _matrix_rows(budgets, l_grid, "B"))
     _write_csv(
         table_dir / "exp8_network_scenario_allocation.csv",
-        ["scenario", "alpha", "beta", "budget", "rho", "bAU", "bAM", "u_inf", "m_inf", "L_A", "C", "state"],
+        ["scenario", "alpha", "beta", "budget", "rho", "bBU", "bBM", "u_A_inf", "m_A_inf", "u_B_inf", "m_B_inf", "L_B", "C", "state"],
         scenario_rows,
     )
 
@@ -242,36 +237,36 @@ def exp8_subsidy_allocation(params: PlatformParams, fig_dir: Path, table_dir: Pa
         summary_rows.append([budget, rhos[best_idx], l_grid[i, best_idx], int(success)])
     for label, alpha, beta in scenarios:
         scenario_data = [row for row in scenario_rows if row[0] == label]
-        best_row = max(scenario_data, key=lambda row: row[9])
-        summary_rows.append([f"{label}(B=1.5)", best_row[4], best_row[9], int(best_row[9] > 0.6)])
-    _write_csv(table_dir / "exp8_summary.csv", ["case_or_budget", "best_rho", "best_L_A", "success"], summary_rows)
+        best_row = max(scenario_data, key=lambda row: row[11])
+        summary_rows.append([f"{label}(B=0.8)", best_row[4], best_row[11], int(best_row[11] > 0.6)])
+    _write_csv(table_dir / "exp8_summary.csv", ["case_or_budget", "best_rho", "best_L_B", "success"], summary_rows)
 
 
 def exp9_subsidy_exit(params: PlatformParams, fig_dir: Path, table_dir: Path) -> None:
-    b0_values = np.linspace(0, 5, 41)
+    b0_values = np.linspace(0, 2, 41)
     ts_values = np.linspace(0, 30, 31)
     l_grid = np.zeros((len(ts_values), len(b0_values)))
     rows = []
 
     for i, ts in enumerate(ts_values):
         for j, b0 in enumerate(b0_values):
-            t, u, m = run_simulation_with_exit_subsidy(params, b0=float(b0), ts=float(ts), u0=0.3, m0=0.3, T=60.0, n_points=500)
-            l_a = combined_share(float(u[-1]), float(m[-1]))
-            l_grid[i, j] = l_a
+            t, u, m = run_simulation_with_exit_subsidy(params, b0=float(b0), ts=float(ts), u0=0.8, m0=0.8, T=60.0, n_points=500)
+            l_b = 1.0 - combined_share(float(u[-1]), float(m[-1]))
+            l_grid[i, j] = l_b
             u_inf = float(u[-1])
             m_inf = float(m[-1])
             c = concentration(u_inf, m_inf)
-            rows.append([b0, ts, u_inf, m_inf, l_a, c, directional_market_state(u_inf, m_inf)])
+            rows.append([b0, ts, u_inf, m_inf, 1.0 - u_inf, 1.0 - m_inf, l_b, c, directional_market_state(u_inf, m_inf)])
 
     plt.figure(figsize=(7.4, 5.4))
-    im = plt.imshow(l_grid, origin="lower", extent=[0, 5, 0, 30], aspect="auto", cmap="viridis", vmin=0, vmax=1)
-    plt.colorbar(im, label="最终综合份额 L_A")
+    im = plt.imshow(l_grid, origin="lower", extent=[0, 2, 0, 30], aspect="auto", cmap="viridis", vmin=0, vmax=1)
+    plt.colorbar(im, label="最终平均份额 L_B")
     plt.xlabel("补贴强度 b0")
     plt.ylabel("补贴持续时间 Ts")
     plt.title("实验9：阶段性补贴退出后的最终份额")
     save_figure(fig_dir / "exp9_subsidy_exit_heatmap.png")
 
-    _write_csv(table_dir / "exp9_subsidy_exit.csv", ["b0", "Ts", "u_inf", "m_inf", "L_A", "C", "state"], rows)
+    _write_csv(table_dir / "exp9_subsidy_exit.csv", ["b0", "Ts", "u_A_inf", "m_A_inf", "u_B_inf", "m_B_inf", "L_B", "C", "state"], rows)
     _write_csv(table_dir / "exp9_subsidy_exit_grid.csv", [""] + [f"b0={b:.2f}" for b in b0_values], _matrix_rows(ts_values, l_grid, "Ts"))
 
 
@@ -336,12 +331,12 @@ def run_simulation_with_exit_subsidy(
     T: float = 60.0,
     n_points: int = 500,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    base_params = params.with_updates(alpha=3.0, beta=3.0, bBU=0.0, bBM=0.0)
+    base_params = params.with_updates(alpha=0.8, beta=0.8, bAU=0.0, bAM=0.0)
     t_eval = np.linspace(0.0, T, n_points)
 
     def dynamics(t: float, y: np.ndarray) -> list[float]:
         subsidy = b0 if t <= ts else 0.0
-        p = base_params.with_updates(bAU=subsidy, bAM=subsidy)
+        p = base_params.with_updates(bBU=subsidy, bBM=subsidy)
         return platform_dynamics(t, y, p)
 
     sol = solve_ivp(

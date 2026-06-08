@@ -138,6 +138,64 @@ def exp3_initial_advantage(params: PlatformParams, fig_dir: Path, table_dir: Pat
         asymmetric_rows,
     )
 
+    # Scan the full initial-condition plane to identify whether the asymmetric
+    # points are isolated thresholds or part of a basin boundary.
+    p_strong = params.with_updates(alpha=3.0, beta=3.0)
+    grid_values = np.linspace(0.1, 0.9, 81)
+    basin_grid = np.zeros((len(grid_values), len(grid_values)))
+    for i, m0 in enumerate(grid_values):
+        for j, u0 in enumerate(grid_values):
+            u_inf, m_inf = run_final_state(p_strong, u0=float(u0), m0=float(m0))
+            basin_grid[i, j] = combined_share(u_inf, m_inf)
+
+    plt.figure(figsize=(7.2, 5.8))
+    im = plt.imshow(
+        basin_grid,
+        origin="lower",
+        extent=[0.1, 0.9, 0.1, 0.9],
+        aspect="auto",
+        cmap="coolwarm",
+        vmin=0,
+        vmax=1,
+    )
+    plt.colorbar(im, label="平台 A 最终平均份额 L_A")
+    boundary_x = np.linspace(0.1, 0.9, 200)
+    plt.plot(boundary_x, 1 - boundary_x, color="black", linestyle="--", linewidth=1.3, label=r"$u_A(0)+m_A(0)=1$")
+    plt.scatter([0.7], [0.3], color="yellow", edgecolor="black", zorder=3, label="(0.7, 0.3)")
+    plt.xlabel(r"初始用户份额 $u_A(0)$")
+    plt.ylabel(r"初始商户份额 $m_A(0)$")
+    plt.grid(alpha=0.18)
+    plt.legend(loc="upper right", fontsize=8)
+    save_figure(fig_dir / "exp3_initial_condition_basin_heatmap.png")
+
+    critical_cases = []
+    boundary_cases = [
+        ("反对角线点", 0.6, 0.4),
+        ("反对角线点", 0.7, 0.3),
+        ("反对角线点", 0.8, 0.2),
+        ("反对角线点", 0.3, 0.7),
+        ("A侧微小扰动", 0.7001, 0.3001),
+        ("B侧微小扰动", 0.6999, 0.2999),
+        ("A侧微小扰动", 0.8001, 0.2001),
+        ("B侧微小扰动", 0.7999, 0.1999),
+    ]
+    for label, u0, m0 in boundary_cases:
+        u_inf, m_inf = run_final_state(p_strong, u0=u0, m0=m0)
+        l_a = combined_share(u_inf, m_inf)
+        total = u0 + m0
+        if abs(total - 1.0) < 1e-12:
+            exact_state = "临界分界线：精确对称模型下收敛到共存均衡"
+        elif total > 1.0:
+            exact_state = "A侧：平台A锁定"
+        else:
+            exact_state = "B侧：平台B锁定"
+        critical_cases.append([label, u0, m0, total, u_inf, m_inf, l_a, directional_market_state(u_inf, m_inf), exact_state])
+    _write_csv(
+        table_dir / "exp3_critical_boundary_cases.csv",
+        ["case", "u0", "m0", "u0_plus_m0", "u_inf_numeric", "m_inf_numeric", "L_A_numeric", "numeric_state", "exact_symmetric_model_state"],
+        critical_cases,
+    )
+
 
 def exp4_quality_threshold(params: PlatformParams, fig_dir: Path, table_dir: Path) -> None:
     dqs = np.linspace(0, 5, 101)

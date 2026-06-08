@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.aux
+*.log
+*.fls
+*.gz
+*.gz.sum.synctex
+*.fdb_latexmk
+*.synctex.gz
+*.synctex(busy)
+*.xdv
+*.tex
+
+zyt/results/
+zyt/results2/
