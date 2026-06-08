@@ -1,0 +1,13 @@
+﻿quality_strategy,quality_label,segment,share_on_A_mean,count_mean
+quality_plus_subsidy,双边质量+少量精准补贴,inertial,0.9989071038251366,54.0
+quality_plus_subsidy,双边质量+少量精准补贴,price_sensitive,0.9988888888888889,57.4
+quality_plus_subsidy,双边质量+少量精准补贴,quality_sensitive,0.9973386034255599,52.8
+quality_plus_subsidy,双边质量+少量精准补贴,subsidy_sensitive,0.9965602197787363,55.8
+two_sided_quality,双边质量优势,inertial,0.9989071038251366,54.0
+two_sided_quality,双边质量优势,price_sensitive,0.9988888888888889,57.4
+two_sided_quality,双边质量优势,quality_sensitive,0.9973386034255599,52.8
+two_sided_quality,双边质量优势,subsidy_sensitive,0.9965602197787363,55.8
+user_quality,用户侧质量优势,inertial,0.6234377839629838,54.0
+user_quality,用户侧质量优势,price_sensitive,0.6427295727110336,57.4
+user_quality,用户侧质量优势,quality_sensitive,0.6998749681865079,52.8
+user_quality,用户侧质量优势,subsidy_sensitive,0.6351400869594971,55.8
