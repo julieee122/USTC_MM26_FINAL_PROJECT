@@ -1,0 +1,4 @@
+﻿subsidy_policy,policy_label,critical_budget_B_star,max_success_probability,best_roi
+uniform,统一补贴,200.0,1.0,4.287229437229437e-05
+random,随机补贴,200.0,1.0,4.3151515151515156e-05
+two_sided_targeted,双边精准,160.0,1.0,5.274107142857143e-05

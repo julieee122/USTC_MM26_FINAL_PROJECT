@@ -1,0 +1,6 @@
+﻿quality_strategy,quality_label,critical_delta_q,max_success_probability,max_final_L_mean
+no_quality,无质量优势,,0.0,0.048484848484848485
+user_quality,用户侧质量优势,0.75,1.0,0.9592424242424242
+merchant_quality,商户侧质量优势,1.25,1.0,0.9948484848484849
+two_sided_quality,双边质量优势,0.5,1.0,0.998030303030303
+quality_plus_subsidy,双边质量+少量精准补贴,0.25,1.0,0.998030303030303
