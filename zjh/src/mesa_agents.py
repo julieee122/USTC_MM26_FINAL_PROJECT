@@ -1,5 +1,5 @@
 import mesa
-
+import numpy as np
 
 class UserAgent(mesa.Agent):
     """
@@ -62,14 +62,16 @@ class UserAgent(mesa.Agent):
     def choose_platforms(self, u_A, u_B):
         gap = abs(u_A - u_B)
 
-        if self.can_multi_home and gap <= self.model.params.multi_home_gap:
+        base_gap = getattr(self.model.params, "user_multi_home_gap", None)
+        if base_gap is None:
+            base_gap = getattr(self.model.params, "multi_home_gap", 0.8)
+
+        if self.can_multi_home and gap <= base_gap:
             return {"A", "B"}
 
         if u_A >= u_B:
             return {"A"}
-
         return {"B"}
-
 
 class MerchantAgent(mesa.Agent):
     """
@@ -128,14 +130,21 @@ class MerchantAgent(mesa.Agent):
     def choose_platforms(self, u_A, u_B):
         gap = abs(u_A - u_B)
 
-        if self.can_multi_home and gap <= self.model.params.multi_home_gap:
+        k_M = getattr(self.model.params, "k_M", 0.0)
+        k_M = max(k_M, getattr(self.model.params, "merchant_multi_home_cost", 0.0))
+        k_M = max(k_M, getattr(self.model.params, "multi_home_cost", 0.0))
+
+        base_gap = getattr(self.model.params, "multi_home_gap", 0.8)
+
+        # k_M 越高，有效多归属门槛越低，因此多归属越难发生
+        effective_gap = base_gap / (1.0 + k_M)
+
+        if self.can_multi_home and gap <= effective_gap:
             return {"A", "B"}
 
         if u_A >= u_B:
             return {"A"}
-
         return {"B"}
-
 
 class PlatformAgent(mesa.Agent):
     """
@@ -208,12 +217,71 @@ class PlatformAgent(mesa.Agent):
                 self.user_invest = p.greedy_user_invest
                 self.merchant_invest = p.greedy_merchant_invest
 
-        elif p.strategy == "long_term":
-            self.user_invest = p.long_term_user_invest
-            self.merchant_invest = p.long_term_merchant_invest
+        elif p.strategy in ["long_term", "targeted_long_term", "full_targeted_long_term"]:
+            self.targeted_long_term_strategy()
 
-        elif p.strategy == "dynamic":
+        elif p.strategy in ["dynamic", "targeted_dynamic", "replace_by_dynamic"]:
             self.dynamic_strategy()
+
+        elif p.strategy in ["pure_quality"]:
+            self.pure_quality_strategy()
+
+        elif p.strategy in ["no_quality_investment"]:
+            self.targeted_long_term_strategy()
+            self.user_invest = 0.0
+            self.merchant_invest = 0.0
+    
+    def targeted_long_term_strategy(self):
+   
+        p = self.model.params
+
+        B = getattr(p, "budget", getattr(p, "total_budget", 0.8))
+
+        x = self.model.user_share_A
+        y = self.model.merchant_share_A
+        shortage = self.model.shortage_A
+
+        user_gap = max(0.0, p.target_share - x)
+        merchant_gap = max(0.0, p.target_share - y)
+
+        if getattr(p, "targeting_enabled", True):
+            user_need = user_gap + 0.05
+            merchant_need = merchant_gap + 1.5 * shortage + 0.05
+        else:
+            user_need = 1.0
+            merchant_need = 1.0
+
+        total_need = user_need + merchant_need
+
+        subsidy_budget = 0.60 * B
+        quality_budget = 0.40 * B
+
+        self.user_subsidy = subsidy_budget * user_need / total_need
+        self.merchant_subsidy = subsidy_budget * merchant_need / total_need
+
+        if getattr(p, "quality_investment_enabled", True):
+            self.user_invest = 0.5 * quality_budget
+            self.merchant_invest = 0.5 * quality_budget
+        else:
+            self.user_invest = 0.0
+            self.merchant_invest = 0.0
+
+
+    def pure_quality_strategy(self):
+    
+        p = self.model.params
+
+        B = getattr(p, "budget", getattr(p, "total_budget", 0.8))
+
+        self.user_subsidy = 0.0
+        self.merchant_subsidy = 0.0
+
+        if getattr(p, "quality_investment_enabled", True):
+            self.user_invest = 0.5 * B
+            self.merchant_invest = 0.5 * B
+        else:
+            self.user_invest = 0.0
+            self.merchant_invest = 0.0
 
     def dynamic_strategy(self):
         """
@@ -251,20 +319,27 @@ class PlatformAgent(mesa.Agent):
     def update_quality(self):
         p = self.model.params
 
-        self.user_quality = max(
-            0.0,
+        if not getattr(p, "quality_investment_enabled", True):
+            self.user_invest = 0.0
+            self.merchant_invest = 0.0
+
+        qmax = getattr(p, "qmax", getattr(p, "q_max", 3.0))
+
+        self.user_quality = np.clip(
             self.user_quality
             + p.invest_eff_user * self.user_invest
-            - p.quality_decay * self.user_quality
+            - p.quality_decay * self.user_quality,
+            0.0,
+            qmax,
         )
 
-        self.merchant_quality = max(
-            0.0,
+        self.merchant_quality = np.clip(
             self.merchant_quality
             + p.invest_eff_merchant * self.merchant_invest
-            - p.quality_decay * self.merchant_quality
+            - p.quality_decay * self.merchant_quality,
+            0.0,
+            qmax,
         )
-
     def update_profit(self):
         p = self.model.params
 
@@ -292,7 +367,11 @@ class PlatformAgent(mesa.Agent):
 
         profit = revenue - subsidy_cost - invest_cost
 
+        discount = getattr(p, "discount", 0.98)
+        discount_weight = discount ** self.model.current_step
+
+
         self.cum_revenue += revenue
         self.cum_subsidy_cost += subsidy_cost
         self.cum_invest_cost += invest_cost
-        self.cum_profit += profit
+        self.cum_profit += discount_weight * profit

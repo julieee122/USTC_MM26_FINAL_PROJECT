@@ -11,21 +11,28 @@ def sigmoid(z):
 
 def compute_shortage(x, y, p):
     """
-    供给不足刻画。
+    报告版供给不足刻画：
 
-    shortage_A = max(0, 用户份额 - 商户份额 - 缓冲项)
+        C_A = max(0, N_U * x / (N_M * y + eps) - rho)
+        C_B = max(0, N_U * (1-x) / (N_M * (1-y) + eps) - rho)
 
-    如果平台 A 用户增长明显快于商户增长，
-    则说明需求扩张过快而供给不足，会降低用户体验。
+    其中：
+    x: 平台 A 用户份额
+    y: 平台 A 商户份额
     """
+    eps = getattr(p, "shortage_buffer", 1e-6)
+    rho = getattr(p, "shortage_rho", 10.0)
+    N_U = getattr(p, "N_U", 1000)
+    N_M = getattr(p, "N_M", 50)
+
     shortage_A = np.maximum(
         0.0,
-        x - p.supply_ratio * y - p.shortage_buffer
+        N_U * x / (N_M * y + eps) - rho
     )
 
     shortage_B = np.maximum(
         0.0,
-        (1.0 - x) - p.supply_ratio * (1.0 - y) - p.shortage_buffer
+        N_U * (1.0 - x) / (N_M * (1.0 - y) + eps) - rho
     )
 
     return shortage_A, shortage_B
@@ -54,9 +61,10 @@ def model_terms(t, state, p, policy):
     shortage_A, shortage_B = compute_shortage(x, y, p)
 
     if p.shortage_enabled:
-        shortage_term = p.shortage_rho * (shortage_A - shortage_B)
+       shortage_theta = getattr(p, "shortage_theta", 1.0)
+       shortage_term = shortage_theta * (shortage_A - shortage_B)
     else:
-        shortage_term = 0.0
+       shortage_term = 0.0
 
     dq_u = p.dq_u_base + q_u_stock
     dq_m = p.dq_m_base + q_m_stock
@@ -127,6 +135,7 @@ def simulate_path(
     T=80.0,
     dt=0.03,
     policy=None,
+    
 ):
     """
     模拟单条市场演化轨迹。
@@ -147,7 +156,7 @@ def simulate_path(
         "revenue_rate", "subsidy_cost_rate",
         "invest_cost_rate", "total_cost_rate", "profit_rate",
         "cum_revenue", "cum_subsidy_cost", "cum_invest_cost",
-        "cum_total_cost", "cum_profit"
+        "cum_total_cost", "cum_profit","cum_discounted_profit"
     ]
 
     result = {k: np.zeros(n_steps + 1) for k in keys}
@@ -159,6 +168,7 @@ def simulate_path(
     cum_invest_cost = 0.0
     cum_total_cost = 0.0
     cum_profit = 0.0
+    cum_discounted_profit = 0.0
 
     for i, t in enumerate(t_values):
         terms = model_terms(t, state, p, policy)
@@ -168,6 +178,7 @@ def simulate_path(
         result["y"][i] = state[1]
         result["q_u"][i] = state[2]
         result["q_m"][i] = state[3]
+        
 
         for k in [
             "D_u", "D_m", "P_u", "P_m",
@@ -183,20 +194,28 @@ def simulate_path(
         result["cum_invest_cost"][i] = cum_invest_cost
         result["cum_total_cost"][i] = cum_total_cost
         result["cum_profit"][i] = cum_profit
+        result["cum_discounted_profit"][i] = cum_discounted_profit
 
         if i < n_steps:
             state = state + dt * terms["derivative"]
 
             state[0] = np.clip(state[0], 0.0, 1.0)
             state[1] = np.clip(state[1], 0.0, 1.0)
-            state[2] = max(state[2], 0.0)
-            state[3] = max(state[3], 0.0)
+            qmax = getattr(p, "qmax", np.inf)
+
+            state[2] = np.clip(state[2], 0.0, qmax)
+            state[3] = np.clip(state[3], 0.0, qmax)
 
             cum_revenue += terms["revenue_rate"] * dt
             cum_subsidy_cost += terms["subsidy_cost_rate"] * dt
             cum_invest_cost += terms["invest_cost_rate"] * dt
             cum_total_cost += terms["total_cost_rate"] * dt
             cum_profit += terms["profit_rate"] * dt
+
+            discount = getattr(p, "discount", 1.0)
+            discount_weight = discount ** t
+
+            cum_discounted_profit += discount_weight * terms["profit_rate"] * dt
 
     return result
 

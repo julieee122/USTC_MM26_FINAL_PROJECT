@@ -86,14 +86,14 @@ class TwoSidedPlatformABM(mesa.Model):
 
     def create_users(self):
         p = self.params
-
+        pref_sigma = 0.05 * (1.0 + getattr(p, "sigma_theta", 0.8))
         for _ in range(p.n_users):
             user_type = self.sample_type(p.user_type_ratios)
             type_param = p.user_type_params[user_type]
 
             can_multi_home = self.rng.random() < p.user_multi_home_prob
             platforms = self.initial_platforms(p.x0, can_multi_home)
-
+            
             agent = UserAgent(
                 model=self,
                 user_type=user_type,
@@ -105,14 +105,15 @@ class TwoSidedPlatformABM(mesa.Model):
                 w_c=type_param["w_c"],
                 inertia=type_param["inertia"],
                 can_multi_home=can_multi_home,
-                base_pref_A=float(self.rng.normal(0.0, 0.05)),
-                base_pref_B=float(self.rng.normal(0.0, 0.05)),
+                base_pref_A=float(self.rng.normal(0.0, pref_sigma)),
+                base_pref_B=float(self.rng.normal(0.0, pref_sigma)),
             )
 
             self.users.append(agent)
 
     def create_merchants(self):
         p = self.params
+        pref_sigma = 0.05 * (1.0 + getattr(p, "sigma_theta", 0.8))
 
         for _ in range(p.n_merchants):
             merchant_type = self.sample_type(p.merchant_type_ratios)
@@ -135,8 +136,10 @@ class TwoSidedPlatformABM(mesa.Model):
                 v_s=type_param["v_s"],
                 v_c=type_param["v_c"],
                 can_multi_home=can_multi_home,
-                base_pref_A=float(self.rng.normal(0.0, 0.05)),
-                base_pref_B=float(self.rng.normal(0.0, 0.05)),
+                
+
+                base_pref_A=float(self.rng.normal(0.0, pref_sigma)),
+                base_pref_B=float(self.rng.normal(0.0, pref_sigma)),
             )
 
             self.merchants.append(agent)
@@ -209,19 +212,26 @@ class TwoSidedPlatformABM(mesa.Model):
         self.user_multi_home_rate = self.multi_home_rate(self.users)
         self.merchant_multi_home_rate = self.multi_home_rate(self.merchants)
 
-        self.shortage_A = max(
-            0.0,
-            self.user_share_A
-            - self.params.supply_capacity * self.merchant_share_A
-            - self.params.shortage_buffer
-        )
+        if getattr(self.params, "shortage_enabled", True):
+           N_U = getattr(self.params, "N_U", 1000)
+           N_M = getattr(self.params, "N_M", 50)
+           rho = getattr(self.params, "shortage_rho", 10.0)
+           eps = getattr(self.params, "shortage_buffer", 1e-6)
 
-        self.shortage_B = max(
-            0.0,
-            (1.0 - self.user_share_A)
-            - self.params.supply_capacity * (1.0 - self.merchant_share_A)
-            - self.params.shortage_buffer
-        )
+           self.shortage_A = max(
+               0.0,
+               N_U * self.user_share_A / (N_M * self.merchant_share_A + eps) - rho
+            )
+
+           self.shortage_B = max(
+               0.0,
+               N_U * (1.0 - self.user_share_A)
+               / (N_M * (1.0 - self.merchant_share_A) + eps)
+               - rho
+            )
+        else:
+            self.shortage_A = 0.0
+            self.shortage_B = 0.0
 
         self.avg_user_utility = self.average_utility(self.users)
         self.avg_merchant_utility = self.average_utility(self.merchants)
@@ -251,16 +261,23 @@ class TwoSidedPlatformABM(mesa.Model):
         inertia_bonus = user.inertia if platform in user.platforms else 0.0
         noise = float(self.rng.gumbel(0.0, p.user_taste_noise))
 
+        alpha = getattr(p, "alpha", 0.8)
+
+        if getattr(p, "shortage_enabled", True) and getattr(p, "supply_penalty_enabled", True):
+            shortage_penalty = getattr(p, "shortage_theta", 1.0) * shortage
+        else:
+            shortage_penalty = 0.0
+
         utility = (
             base_pref
             + user.w_q * quality
-            + user.w_m * merchant_share
+            + user.w_m * alpha * merchant_share
             + user.w_s * subsidy
             - user.w_p * price
-            - user.w_c * p.shortage_rho * shortage
+            - user.w_c * shortage_penalty
             + inertia_bonus
             + noise
-        )
+       )
 
         return utility
 
@@ -283,16 +300,17 @@ class TwoSidedPlatformABM(mesa.Model):
         inertia_bonus = 0.25 if platform in merchant.platforms else 0.0
         noise = float(self.rng.gumbel(0.0, p.merchant_taste_noise))
 
+        beta = getattr(p, "beta", 0.8)
+
         utility = (
             base_pref
             + merchant.v_r * quality
-            + merchant.v_u * user_share
+            + merchant.v_u * beta * user_share
             + merchant.v_s * subsidy
             - merchant.v_c * commission
             + inertia_bonus
             + noise
         )
-
         return utility
 
     # ============================================================

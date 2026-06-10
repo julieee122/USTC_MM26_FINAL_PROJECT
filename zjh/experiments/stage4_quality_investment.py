@@ -2,144 +2,236 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-from src.config import Params
-from src.model import simulate_path
-from src.policies import (
-    greedy_quality_policy,
-    long_term_quality_policy,
-    dynamic_quality_policy,
-)
-from src.utils import (
+from experiments.report_common import (
     ensure_dir,
     setup_matplotlib,
-    save_metrics_csv,
-    save_timeseries_csv,
-    summarize_result,
+    save_rows_csv,
+    make_params,
+    call_simulate,
+    get_x,
+    get_y,
+    get_profit,
+    get_shortage,
+    get_quality,
+    combined_share,
+    static_policy,
 )
 
 
+DT = 0.05
+T = 300.0
+
+X0_B = 0.2
+Y0_B = 0.2
+
+BUDGET = 0.8
+
+N_U = 1000
+N_M = 50
+RHO = 10.0
+THETA = 1.0
+EPS = 1e-6
+
+LAMBDA_Q = 0.05
+QUALITY_DECAY = 0.01
+Q_MAX = 3.0
+
+
+def dynamic_report_policy(t, state, p):
+    """
+    报告 5.6 中的动态策略：
+    - 供给不足较强：偏商户补贴；
+    - 用户侧不足：偏用户补贴；
+    - 否则提高质量投资比例。
+    """
+    if isinstance(state, dict):
+        x = float(state.get("x", state.get("u", X0_B)))
+        y = float(state.get("y", state.get("m", Y0_B)))
+    else:
+        x = float(state[0])
+        y = float(state[1])
+
+    ratio = N_U * x / (N_M * y + EPS)
+
+    if ratio > RHO:
+        su, sm, inv = 0.2 * BUDGET, 0.6 * BUDGET, 0.2 * BUDGET
+    elif ratio < 0.8 * RHO:
+        su, sm, inv = 0.6 * BUDGET, 0.2 * BUDGET, 0.2 * BUDGET
+    else:
+        su, sm, inv = 0.3 * BUDGET, 0.3 * BUDGET, 0.4 * BUDGET
+
+    return {
+        "ds_u": su,
+        "ds_m": sm,
+        "inv_u": inv,
+        "inv_m": inv,
+    }
+
 def run_stage4(output_root: str):
+    """
+    阶段4：服务质量投资与混合策略。
+
+    对应报告 5.6：
+    - 加入供给不足惩罚和服务质量更新；
+    - N_U=1000, N_M=50, rho=10.0；
+    - B=0.8；
+    - lambda_q=0.05, d=0.01, qmax=3.0；
+    - T=300；
+    - 比较贪心、长期、动态、纯质量投资。
+    """
     setup_matplotlib()
 
     out = os.path.join(output_root, "stage4_quality_investment")
     ensure_dir(out)
 
-    x0 = 0.35
-    y0 = 0.35
-
-    p = Params(
-        alpha=1.2,
-        beta=1.0,
-        shortage_enabled=True,
-        shortage_rho=4.5,
-        shortage_buffer=0.02,
-        quality_decay=0.045,
-        invest_eff_u=0.28,
-        invest_eff_m=0.28,
-    )
+    network_cases = [
+        ("中等", 0.8, 0.8),
+        ("强", 1.5, 1.5),
+    ]
 
     strategies = {
-        "贪心策略": greedy_quality_policy,
-        "长期策略": long_term_quality_policy,
-        "动态策略": dynamic_quality_policy,
+        "贪心策略": static_policy(0.8 * BUDGET, 0.1 * BUDGET, 0.1 * BUDGET),
+        "长期策略": static_policy(0.3 * BUDGET, 0.4 * BUDGET, 0.3 * BUDGET),
+        "动态策略": dynamic_report_policy,
+        "纯质量投资": static_policy(0.0, 0.0, BUDGET),
     }
 
-    results = {}
-    metrics = []
+    all_rows = []
+    all_results = {}
 
-    for name, policy in strategies.items():
-        res = simulate_path(x0, y0, p, T=100.0, dt=0.03, policy=policy)
-        results[name] = res
-        metrics.append(summarize_result(name, res))
-        save_timeseries_csv(res, os.path.join(out, f"stage4_{name}_timeseries.csv"))
+    for network_name, alpha, beta in network_cases:
+        params = make_params(
+            alpha=alpha,
+            beta=beta,
+            shortage_enabled=True,
+            N_U=N_U,
+            N_M=N_M,
+            rho=RHO,
+            theta=THETA,
+            epsilon=EPS,
+            shortage_rho=RHO,
+            shortage_buffer=EPS,
+            lambda_q=LAMBDA_Q,
+            quality_decay=QUALITY_DECAY,
+            qmax=Q_MAX,
+        )
 
-    save_metrics_csv(metrics, os.path.join(out, "stage4_metrics.csv"))
+        for strategy_name, policy in strategies.items():
+            res = call_simulate(
+                X0_B,
+                Y0_B,
+                params,
+                T=T,
+                dt=DT,
+                policy=policy,
+            )
 
-    # ============================================================
-    # 4.1 用户份额与商户份额
-    # ============================================================
+            all_results[(network_name, strategy_name)] = res
 
-    fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
+            final_u = get_x(res)
+            final_m = get_y(res)
+            final_q = get_quality(res)
+            max_shortage, avg_shortage = get_shortage(res)
+            profit = get_profit(res)
 
-    for name, res in results.items():
-        axes[0].plot(res["t"], res["x"], label=f"{name}, x*={res['x'][-1]:.2f}")
-        axes[1].plot(res["t"], res["y"], label=f"{name}, y*={res['y'][-1]:.2f}")
+            all_rows.append({
+                "network": network_name,
+                "alpha": alpha,
+                "beta": beta,
+                "strategy": strategy_name,
+                "final_B_user_share": final_u,
+                "final_B_merchant_share": final_m,
+                "final_B_average_share": combined_share(final_u, final_m),
+                "final_quality": final_q,
+                "max_shortage_B": max_shortage,
+                "avg_shortage_B": avg_shortage,
+                "profit": profit,
+            })
 
-    axes[0].set_title("阶段4：服务质量投资策略下的用户份额演化")
-    axes[0].set_ylabel(r"$x(t)$")
-    axes[0].set_ylim(0, 1)
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
+    save_rows_csv(all_rows, os.path.join(out, "stage4_quality_investment_metrics.csv"))
 
-    axes[1].set_title("阶段4：服务质量投资策略下的商户份额演化")
-    axes[1].set_xlabel("时间")
-    axes[1].set_ylabel(r"$y(t)$")
-    axes[1].set_ylim(0, 1)
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
+    # 图 1：中等网络效应下平台 B 平均份额
+    plt.figure(figsize=(9, 5))
+    for strategy_name in strategies:
+        res = all_results[("中等", strategy_name)]
+        t = np.asarray(res["t"], dtype=float)
+        x = np.asarray(res["x"], dtype=float)
+        y = np.asarray(res["y"], dtype=float)
+        avg = 0.5 * (x + y)
+        plt.plot(t, avg, label=f"{strategy_name}, L_B={avg[-1]:.3f}")
 
-    fig.savefig(
-        os.path.join(out, "stage4_quality_investment_share_dynamics.png"),
-        dpi=300,
-        bbox_inches="tight"
-    )
-    plt.close(fig)
-
-    # ============================================================
-    # 4.2 服务质量优势动态
-    # ============================================================
-
-    fig, axes = plt.subplots(2, 1, figsize=(11, 9), sharex=True)
-
-    for name, res in results.items():
-        axes[0].plot(res["t"], res["q_u"], label=name)
-        axes[1].plot(res["t"], res["q_m"], label=name)
-
-    axes[0].set_title("阶段4：用户侧服务质量优势动态")
-    axes[0].set_ylabel(r"$q_U(t)$")
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
-
-    axes[1].set_title("阶段4：商户侧服务质量优势动态")
-    axes[1].set_xlabel("时间")
-    axes[1].set_ylabel(r"$q_M(t)$")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
-
-    fig.savefig(
-        os.path.join(out, "stage4_quality_stock_dynamics.png"),
-        dpi=300,
-        bbox_inches="tight"
-    )
-    plt.close(fig)
-
-    # ============================================================
-    # 4.3 成本收益比较
-    # ============================================================
-
-    names = [m["name"] for m in metrics]
-    final_x = [m["final_x"] for m in metrics]
-    final_y = [m["final_y"] for m in metrics]
-    invest_cost = [m["cum_invest_cost"] for m in metrics]
-    profits = [m["cum_profit"] for m in metrics]
-
-    x = np.arange(len(names))
-    width = 0.2
-
-    plt.figure(figsize=(11, 6))
-    plt.bar(x - 1.5 * width, final_x, width, label=r"最终用户份额 $x^*$")
-    plt.bar(x - 0.5 * width, final_y, width, label=r"最终商户份额 $y^*$")
-    plt.bar(x + 0.5 * width, invest_cost, width, label="累计投资成本")
-    plt.bar(x + 1.5 * width, profits, width, label="累计净收益")
-
-    plt.xticks(x, names)
-    plt.title("阶段4：服务质量投资策略综合比较")
-    plt.grid(True, axis="y", alpha=0.3)
+    plt.axhline(0.5, linestyle="--", linewidth=1.0, label="反超阈值 0.5")
+    plt.xlabel("时间")
+    plt.ylabel(r"平台 B 平均份额 $L_B$")
+    plt.title("阶段4：服务质量投资策略下的平台 B 平均份额")
+    plt.ylim(0, 1.05)
+    plt.grid(alpha=0.3)
     plt.legend()
-
-    plt.savefig(
-        os.path.join(out, "stage4_strategy_comparison.png"),
-        dpi=300,
-        bbox_inches="tight"
-    )
+    plt.tight_layout()
+    plt.savefig(os.path.join(out, "stage4_quality_share_dynamics.png"), dpi=300)
     plt.close()
+
+    # 图 2：服务质量动态
+    plt.figure(figsize=(9, 5))
+    for strategy_name in strategies:
+        res = all_results[("中等", strategy_name)]
+        t = np.asarray(res["t"], dtype=float)
+
+        if "q_u" in res:
+            q = np.asarray(res["q_u"], dtype=float)
+        elif "quality_u" in res:
+            q = np.asarray(res["quality_u"], dtype=float)
+        else:
+            q = np.zeros_like(t)
+
+        plt.plot(t, q, label=f"{strategy_name}, q(T)={q[-1]:.3f}")
+
+    plt.xlabel("时间")
+    plt.ylabel(r"用户侧服务质量 $q_B^U(t)$")
+    plt.title("阶段4：服务质量投资策略下的质量积累")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(out, "stage4_quality_stock_dynamics.png"), dpi=300)
+    plt.close()
+
+    # 图 3：中等与强网络效应下策略利润比较
+    for network_name, _, _ in network_cases:
+        rows = [r for r in all_rows if r["network"] == network_name]
+        labels = [r["strategy"] for r in rows]
+
+        x_pos = np.arange(len(labels))
+        width = 0.22
+
+        plt.figure(figsize=(10, 5))
+        plt.bar(
+            x_pos - width,
+            [r["final_B_average_share"] for r in rows],
+            width,
+            label=r"最终平均份额 $L_B$",
+        )
+        plt.bar(
+            x_pos,
+            [r["final_quality"] for r in rows],
+            width,
+            label="最终质量",
+        )
+        plt.bar(
+            x_pos + width,
+            [r["profit"] for r in rows],
+            width,
+            label="贴现利润",
+        )
+
+        plt.xticks(x_pos, labels)
+        plt.title(f"阶段4：{network_name}网络效应下策略综合比较")
+        plt.grid(axis="y", alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(out, f"stage4_strategy_comparison_{network_name}.png"),
+            dpi=300,
+        )
+        plt.close()
+
+    print("  阶段4完成。")

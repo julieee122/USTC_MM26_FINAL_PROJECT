@@ -2,144 +2,181 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-from src.config import Params
-from src.model import simulate_path
-from src.policies import zero_policy, make_decay_subsidy_policy
-from src.utils import (
+from experiments.report_common import (
     ensure_dir,
     setup_matplotlib,
-    save_metrics_csv,
-    save_timeseries_csv,
-    summarize_result,
+    save_rows_csv,
+    make_params,
+    call_simulate,
+    get_x,
+    get_y,
+    get_profit,
+    get_shortage,
+    combined_share,
+    static_policy,
 )
 
 
+DT = 0.05
+T = 200.0
+
+# 报告 5.5：平台 A 初始占优 0.8，因此平台 B 挑战者初始份额为 0.2
+X0_B = 0.2
+Y0_B = 0.2
+
+ALPHA = 0.8
+BETA = 0.8
+
+BUDGET = 0.8
+
+N_U = 1000
+N_M = 50
+RHO = 10.0
+THETA = 1.0
+EPS = 1e-6
+
+
 def run_stage3(output_root: str):
+    """
+    阶段3：供给约束下的补贴策略修正。
+
+    对应报告 5.5：
+    - 中等网络效应 alpha=beta=0.8；
+    - 平台 B 初始为挑战者，x0=y0=0.2；
+    - N_U=1000, N_M=50, rho=10.0, theta=1.0；
+    - 预算固定为 B=0.8；
+    - 比较只补贴用户、只补贴商户、均衡补贴、偏商户补贴。
+    """
     setup_matplotlib()
 
     out = os.path.join(output_root, "stage3_shortage")
     ensure_dir(out)
 
-    x0 = 0.35
-    y0 = 0.35
-
-    p = Params(
-        alpha=1.2,
-        beta=1.0,
+    params = make_params(
+        alpha=ALPHA,
+        beta=BETA,
         shortage_enabled=True,
-        shortage_rho=5.0,
-        shortage_buffer=0.02,
+        N_U=N_U,
+        N_M=N_M,
+        rho=RHO,
+        theta=THETA,
+        epsilon=EPS,
+        shortage_rho=RHO,
+        shortage_buffer=EPS,
     )
 
     strategies = {
-        "无补贴": zero_policy,
-        "用户补贴_需求快速增长": make_decay_subsidy_policy(
-            su0=1.10,
-            sm0=0.00,
-            decay_u=0.04,
-            decay_m=0.06,
-        ),
-        "商户补贴_长期稳定": make_decay_subsidy_policy(
-            su0=0.15,
-            sm0=0.95,
-            decay_u=0.07,
-            decay_m=0.03,
-        ),
-        "双边协调补贴": make_decay_subsidy_policy(
-            su0=0.65,
-            sm0=0.75,
-            decay_u=0.07,
-            decay_m=0.035,
-        ),
+        "只补贴用户": static_policy(BUDGET, 0.0, 0.0),
+        "只补贴商户": static_policy(0.0, BUDGET, 0.0),
+        "均衡补贴": static_policy(0.5 * BUDGET, 0.5 * BUDGET, 0.0),
+        "偏商户补贴": static_policy(0.25 * BUDGET, 0.75 * BUDGET, 0.0),
     }
 
     results = {}
-    metrics = []
+    rows = []
 
     for name, policy in strategies.items():
-        res = simulate_path(x0, y0, p, T=90.0, dt=0.03, policy=policy)
-        results[name] = res
-        metrics.append(summarize_result(name, res))
-        save_timeseries_csv(res, os.path.join(out, f"stage3_{name}_timeseries.csv"))
-
-    save_metrics_csv(metrics, os.path.join(out, "stage3_metrics.csv"))
-
-    # ============================================================
-    # 3.1 用户份额、商户份额、供给不足程度
-    # ============================================================
-
-    fig, axes = plt.subplots(3, 1, figsize=(11, 12), sharex=True)
-
-    for name, res in results.items():
-        axes[0].plot(res["t"], res["x"], label=f"{name}, x*={res['x'][-1]:.2f}")
-        axes[1].plot(res["t"], res["y"], label=f"{name}, y*={res['y'][-1]:.2f}")
-        axes[2].plot(
-            res["t"],
-            res["shortage_A"],
-            label=f"{name}, max={np.max(res['shortage_A']):.2f}"
+        res = call_simulate(
+            X0_B,
+            Y0_B,
+            params,
+            T=T,
+            dt=DT,
+            policy=policy,
         )
 
-    axes[0].set_title("阶段3：供给不足惩罚下的用户份额演化")
-    axes[0].set_ylabel(r"$x(t)$")
-    axes[0].set_ylim(0, 1)
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
+        results[name] = res
 
-    axes[1].set_title("阶段3：供给不足惩罚下的商户份额演化")
-    axes[1].set_ylabel(r"$y(t)$")
-    axes[1].set_ylim(0, 1)
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
+        final_u = get_x(res)
+        final_m = get_y(res)
+        max_shortage, avg_shortage = get_shortage(res)
+        profit = get_profit(res)
 
-    axes[2].set_title("阶段3：平台 A 的供给不足程度")
-    axes[2].set_xlabel("时间")
-    axes[2].set_ylabel("shortage_A")
-    axes[2].grid(True, alpha=0.3)
-    axes[2].legend()
+        rows.append({
+            "strategy": name,
+            "final_B_user_share": final_u,
+            "final_B_merchant_share": final_m,
+            "final_B_average_share": combined_share(final_u, final_m),
+            "max_shortage_B": max_shortage,
+            "avg_shortage_B": avg_shortage,
+            "profit": profit,
+        })
 
-    fig.savefig(
-        os.path.join(out, "stage3_shortage_dynamics.png"),
-        dpi=300,
-        bbox_inches="tight"
+    save_rows_csv(rows, os.path.join(out, "stage3_shortage_metrics.csv"))
+
+    # 图 1：平台 B 平均份额动态
+    plt.figure(figsize=(9, 5))
+    for name, res in results.items():
+        x = np.asarray(res["x"], dtype=float)
+        y = np.asarray(res["y"], dtype=float)
+        t = np.asarray(res["t"], dtype=float)
+        avg = 0.5 * (x + y)
+        plt.plot(t, avg, label=f"{name}, L_B={avg[-1]:.3f}")
+
+    plt.axhline(0.5, linestyle="--", linewidth=1.0, label="反超阈值 0.5")
+    plt.xlabel("时间")
+    plt.ylabel(r"平台 B 平均份额 $L_B$")
+    plt.title("阶段3：供给不足惩罚下的平台 B 平均份额变化")
+    plt.ylim(0, 1.05)
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(out, "stage3_shortage_average_share.png"), dpi=300)
+    plt.close()
+
+    # 图 2：供给不足惩罚动态
+    plt.figure(figsize=(9, 5))
+    for name, res in results.items():
+        if "shortage_B" in res:
+            shortage = np.asarray(res["shortage_B"], dtype=float)
+        elif "shortage_A" in res:
+            shortage = np.asarray(res["shortage_A"], dtype=float)
+        else:
+            shortage = np.zeros_like(np.asarray(res["t"], dtype=float))
+
+        t = np.asarray(res["t"], dtype=float)
+        plt.plot(t, shortage, label=f"{name}, max={np.max(shortage):.2f}")
+
+    plt.xlabel("时间")
+    plt.ylabel(r"供给不足惩罚 $C_B$")
+    plt.title("阶段3：不同补贴策略下的供给不足惩罚")
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(out, "stage3_shortage_penalty.png"), dpi=300)
+    plt.close()
+
+    # 图 3：最终结果柱状图
+    labels = [r["strategy"] for r in rows]
+    x_pos = np.arange(len(labels))
+    width = 0.22
+
+    plt.figure(figsize=(10, 5))
+    plt.bar(
+        x_pos - width,
+        [r["final_B_average_share"] for r in rows],
+        width,
+        label=r"最终平均份额 $L_B$",
     )
-    plt.close(fig)
-
-    # ============================================================
-    # 3.2 成本收益与供给不足比较
-    # ============================================================
-
-    names = [m["name"] for m in metrics]
-    profits = [m["cum_profit"] for m in metrics]
-    max_shortage = [m["max_shortage_A"] for m in metrics]
-    final_x = [m["final_x"] for m in metrics]
-
-    x = np.arange(len(names))
-
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-
-    axes[0].bar(x, final_x)
-    axes[0].set_title("最终用户份额")
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(names, rotation=20)
-    axes[0].set_ylim(0, 1)
-    axes[0].grid(True, axis="y", alpha=0.3)
-
-    axes[1].bar(x, max_shortage)
-    axes[1].set_title("最大供给不足程度")
-    axes[1].set_xticks(x)
-    axes[1].set_xticklabels(names, rotation=20)
-    axes[1].grid(True, axis="y", alpha=0.3)
-
-    axes[2].bar(x, profits)
-    axes[2].set_title("累计净收益")
-    axes[2].set_xticks(x)
-    axes[2].set_xticklabels(names, rotation=20)
-    axes[2].grid(True, axis="y", alpha=0.3)
-
-    fig.suptitle("阶段3：供给不足约束下的策略比较", fontsize=16)
-    fig.savefig(
-        os.path.join(out, "stage3_strategy_comparison.png"),
-        dpi=300,
-        bbox_inches="tight"
+    plt.bar(
+        x_pos,
+        [r["avg_shortage_B"] for r in rows],
+        width,
+        label=r"平均供给不足 $C_B$",
     )
-    plt.close(fig)
+    plt.bar(
+        x_pos + width,
+        [r["profit"] for r in rows],
+        width,
+        label="贴现利润",
+    )
+
+    plt.xticks(x_pos, labels)
+    plt.title("阶段3：供给约束下的策略比较")
+    plt.grid(axis="y", alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(out, "stage3_shortage_strategy_comparison.png"), dpi=300)
+    plt.close()
+
+    print("  阶段3完成。")

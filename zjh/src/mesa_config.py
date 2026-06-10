@@ -27,6 +27,15 @@ class MesaABMParams:
     x0: float = 0.35
     y0: float = 0.35
 
+    # 双边网络效应强度
+    alpha: float = 0.8
+    beta: float = 0.8
+
+    # 个体异质性强度
+    sigma_theta: float = 0.8
+    sigmaU: float = 0.8
+    sigmaM: float = 0.8
+    preference_sigma: float = 0.8
     # 用户类型比例
     user_type_ratios: Dict[str, float] = field(default_factory=lambda: {
         "price_sensitive": 0.40,
@@ -129,7 +138,12 @@ class MesaABMParams:
     merchant_multi_home_override: Optional[float] = None
 
     # 效用差距低于该阈值时，多归属智能体可同时选择两个平台
-    multi_home_gap: float = 0.20
+    multi_home_gap: float = 0.80
+
+    # 商户多归属成本，报告实验 2 扫描 k_M
+    k_M: float = 0.0
+    merchant_multi_home_cost: float = 0.0
+    multi_home_cost: float = 0.0
 
     # 随机偏好扰动
     user_taste_noise: float = 0.15
@@ -141,9 +155,17 @@ class MesaABMParams:
     commission_A: float = 0.0
     commission_B: float = 0.0
 
-    # 供给不足惩罚
-    shortage_rho: float = 4.5
-    shortage_buffer: float = 0.02
+    shortage_enabled: bool = True
+    supply_penalty_enabled: bool = True
+
+    N_U: int = 1000
+    N_M: int = 50
+
+    shortage_rho: float = 10.0
+    shortage_theta: float = 1.0
+    shortage_buffer: float = 1e-6
+
+   # 兼容旧字段
     supply_capacity: float = 1.0
 
     # 收益参数
@@ -155,9 +177,18 @@ class MesaABMParams:
     cost_merchant_subsidy: float = 0.9
 
     # 服务质量投资参数
-    invest_eff_user: float = 0.25
-    invest_eff_merchant: float = 0.25
-    quality_decay: float = 0.04
+    quality_investment_enabled: bool = True
+
+    invest_eff_user: float = 0.05
+    invest_eff_merchant: float = 0.05
+
+    # 兼容 stage6 传入的不同字段名
+    lambda_q: float = 0.05
+    quality_efficiency: float = 0.05
+
+    quality_decay: float = 0.01
+    qmax: float = 3.0
+    q_max: float = 3.0
     cost_invest_user: float = 1.1
     cost_invest_merchant: float = 1.1
 
@@ -180,6 +211,15 @@ class MesaABMParams:
 
     dynamic_budget: float = 0.85
     target_share: float = 0.60
+
+    # 总预算/策略预算
+    budget: float = 0.8
+    total_budget: float = 0.8
+    budget_total: float = 0.8
+
+    # 精准补贴开关
+    targeted: bool = True
+    targeting_enabled: bool = True
 
     # 平台 A 策略
     # 可选：
