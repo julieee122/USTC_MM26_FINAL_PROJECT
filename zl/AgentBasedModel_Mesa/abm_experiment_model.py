@@ -35,11 +35,22 @@ class ExperimentParams:
     subsidy_budget: float = 180.0
     max_subsidy_per_agent: float = 2.0
     multi_home_cost: float = 0.5
-    multi_home_visibility: float = 0.85
+    multi_home_visibility: float = 0.5
     social_eta: float = 0.0
     user_inertia_mean: float = 0.25
     merchant_inertia_mean: float = 0.25
     initial_a_inertia_boost: float = 0.0
+    user_subsidy_segment_multiplier: float = 1.6
+    merchant_subsidy_segment_multiplier: float = 1.6
+    supply_penalty_enabled: bool = False
+    supply_rho: float = 10.0
+    supply_theta: float = 1.0
+    supply_eps: float = 1e-6
+    user_scale: float = 1000.0
+    merchant_scale: float = 50.0
+    quality_lambda: float = 0.05
+    quality_decay: float = 0.01
+    quality_max: float = 3.0
 
 
 @dataclass
@@ -73,13 +84,14 @@ class PlatformCompetitionABM:
     def __init__(
         self,
         *,
-        n_users: int = 500,
-        n_merchants: int = 250,
+        n_users: int = 400,
+        n_merchants: int = 20,
         u0: float = 0.5,
         m0: float = 0.5,
         params: ExperimentParams | None = None,
         seed: int | None = None,
         subsidy_policy: str = "none",
+        subsidy_platform: str = "A",
         allow_multi_home: bool = False,
         multi_home_share: float = 1.0,
         network_type: str = "none",
@@ -92,6 +104,7 @@ class PlatformCompetitionABM:
         self.n_users = n_users
         self.n_merchants = n_merchants
         self.subsidy_policy = subsidy_policy
+        self.subsidy_platform = subsidy_platform
         self.allow_multi_home = allow_multi_home
         self.multi_home_share = multi_home_share
         self.network_type = network_type
@@ -130,7 +143,7 @@ class PlatformCompetitionABM:
             elif segment == "quality_sensitive":
                 quality *= 1.5
             elif segment == "subsidy_sensitive":
-                subsidy *= 1.6
+                subsidy *= self.params.user_subsidy_segment_multiplier
             elif segment == "inertial":
                 inertia *= 2.0
             influence = 1.0 + self.user_graph.degree(uid) / max(1, self.n_users - 1) if self.user_graph else 1.0
@@ -168,7 +181,7 @@ class PlatformCompetitionABM:
             elif segment == "cost_sensitive":
                 commission *= 1.5
             elif segment == "subsidy_sensitive":
-                subsidy *= 1.6
+                subsidy *= self.params.merchant_subsidy_segment_multiplier
             elif segment == "inertial":
                 inertia *= 2.0
             status = "A_only" if mid < n_a else "B_only"
@@ -264,6 +277,32 @@ class PlatformCompetitionABM:
     def combined_share_a(self) -> float:
         return 0.5 * (self.user_share_a + self.merchant_presence_a)
 
+    def _supply_shortage(self, user_share: float, merchant_share: float) -> float:
+        if not self.params.supply_penalty_enabled:
+            return 0.0
+        actual_users = user_share * self.params.user_scale
+        actual_merchants = merchant_share * self.params.merchant_scale
+        ratio = actual_users / (actual_merchants + self.params.supply_eps)
+        return max(0.0, ratio - self.params.supply_rho)
+
+    def _update_b_quality(self, investment: float) -> None:
+        if investment <= 0:
+            return
+        self.params.q_b_user = float(
+            np.clip(
+                self.params.q_b_user + self.params.quality_lambda * investment - self.params.quality_decay * self.params.q_b_user,
+                0.0,
+                self.params.quality_max,
+            )
+        )
+        self.params.q_b_merchant = float(
+            np.clip(
+                self.params.q_b_merchant + self.params.quality_lambda * investment - self.params.quality_decay * self.params.q_b_merchant,
+                0.0,
+                self.params.quality_max,
+            )
+        )
+
     def _neighbor_share_a(self, user: UserState, platform_by_uid: dict[int, str] | None = None) -> float:
         if not self.user_graph:
             return 0.0
@@ -282,7 +321,8 @@ class PlatformCompetitionABM:
             target_count = max(1, len(candidates) // 3)
             return set(self.rng.sample(candidates, target_count))
         if self.subsidy_policy in {"swing_user", "user_targeted", "two_sided_targeted", "dynamic_targeted"}:
-            users = [u for u in self.users if u.platform == "B"]
+            source_platform = "B" if self.subsidy_platform == "A" else "A"
+            users = [u for u in self.users if u.platform == source_platform]
             users.sort(key=lambda u: (u.subsidy_sensitivity - 0.35 * u.inertia, u.price_sensitivity), reverse=True)
             return {u.uid for u in users[: max(1, len(users) // 3)]}
         return set()
@@ -295,14 +335,26 @@ class PlatformCompetitionABM:
             target_count = max(1, len(candidates) // 3)
             return set(self.rng.sample(candidates, target_count))
         if self.subsidy_policy in {"key_merchant", "merchant_targeted", "two_sided_targeted", "dynamic_targeted"}:
-            merchants = [m for m in self.merchants if m.status != "A_only"]
+            target_status = "A_only" if self.subsidy_platform == "A" else "B_only"
+            merchants = [m for m in self.merchants if m.status != target_status]
             merchants.sort(key=lambda m: (m.traffic_sensitivity * m.value_weight + m.subsidy_sensitivity - 0.35 * m.inertia), reverse=True)
             return {m.mid for m in merchants[: max(1, len(merchants) // 3)]}
         return set()
 
-    def _subsidy_sets(self) -> tuple[set[int], set[int], float, float]:
+    def _subsidy_sets(
+        self,
+        *,
+        user_budget: float | None = None,
+        merchant_budget: float | None = None,
+        subsidy_policy: str | None = None,
+    ) -> tuple[set[int], set[int], float, float, float]:
+        original_policy = self.subsidy_policy
+        if subsidy_policy is not None:
+            self.subsidy_policy = subsidy_policy
         if self.subsidy_policy == "none":
-            return set(), set(), 0.0, 0.0
+            if subsidy_policy is not None:
+                self.subsidy_policy = original_policy
+            return set(), set(), 0.0, 0.0, 0.0
         user_targets = self._targeted_users()
         merchant_targets = self._targeted_merchants()
         if self.subsidy_policy == "dynamic_targeted":
@@ -311,15 +363,43 @@ class PlatformCompetitionABM:
             elif self.combined_share_a > 0.6:
                 user_targets = {u.uid for u in self.users if u.platform == "A" and u.subsidy_sensitivity > 1.0}
                 merchant_targets = {m.mid for m in self.merchants if m.status == "A_only" and m.subsidy_sensitivity > 1.0}
-        target_count = len(user_targets) + len(merchant_targets)
-        if target_count == 0:
-            return user_targets, merchant_targets, 0.0, 0.0
-        subsidy_amount = min(self.params.max_subsidy_per_agent, self.params.subsidy_budget / target_count)
-        spend = subsidy_amount * target_count
-        return user_targets, merchant_targets, subsidy_amount, spend
+        total_budget = self.params.subsidy_budget
+        if user_budget is None and merchant_budget is None:
+            target_count = len(user_targets) + len(merchant_targets)
+            if target_count == 0:
+                if subsidy_policy is not None:
+                    self.subsidy_policy = original_policy
+                return user_targets, merchant_targets, 0.0, 0.0, 0.0
+            amount = min(self.params.max_subsidy_per_agent, total_budget / target_count)
+            spend = amount * target_count
+            if subsidy_policy is not None:
+                self.subsidy_policy = original_policy
+            return user_targets, merchant_targets, amount, amount, spend
 
-    def step(self) -> dict[str, float]:
-        user_targets, merchant_targets, subsidy_amount, spend = self._subsidy_sets()
+        user_amount = 0.0
+        merchant_amount = 0.0
+        if user_targets:
+            user_amount = min(self.params.max_subsidy_per_agent, max(0.0, user_budget or 0.0) / len(user_targets))
+        if merchant_targets:
+            merchant_amount = min(self.params.max_subsidy_per_agent, max(0.0, merchant_budget or 0.0) / len(merchant_targets))
+        spend = user_amount * len(user_targets) + merchant_amount * len(merchant_targets)
+        if subsidy_policy is not None:
+            self.subsidy_policy = original_policy
+        return user_targets, merchant_targets, user_amount, merchant_amount, spend
+
+    def step(
+        self,
+        *,
+        user_subsidy_budget: float | None = None,
+        merchant_subsidy_budget: float | None = None,
+        quality_investment: float = 0.0,
+        subsidy_policy: str | None = None,
+    ) -> dict[str, float]:
+        user_targets, merchant_targets, user_subsidy_amount, merchant_subsidy_amount, spend = self._subsidy_sets(
+            user_budget=user_subsidy_budget,
+            merchant_budget=merchant_subsidy_budget,
+            subsidy_policy=subsidy_policy,
+        )
         self.total_subsidy_spend += spend
 
         users = self.users[:]
@@ -330,10 +410,14 @@ class PlatformCompetitionABM:
         m_a = self.merchant_presence_a
         m_b = self.merchant_presence_b
         u_a = self.user_share_a
+        shortage_a = self._supply_shortage(u_a, m_a)
+        shortage_b = self._supply_shortage(1.0 - u_a, m_b)
         platform_by_uid = {u.uid: u.platform for u in self.users}
 
         for user in users:
-            subsidy_a = subsidy_amount if user.uid in user_targets else 0.0
+            targeted_user = user.uid in user_targets
+            subsidy_a = user_subsidy_amount if targeted_user and self.subsidy_platform == "A" else 0.0
+            subsidy_b = user_subsidy_amount if targeted_user and self.subsidy_platform == "B" else 0.0
             neighbor_share_a = self._neighbor_share_a(user, platform_by_uid)
             social_a = self.params.social_eta * neighbor_share_a
             social_b = self.params.social_eta * (1.0 - neighbor_share_a)
@@ -342,6 +426,7 @@ class PlatformCompetitionABM:
                 + self.params.alpha * m_a
                 + user.subsidy_sensitivity * subsidy_a
                 - user.price_sensitivity * self.params.p_a_user
+                - self.params.supply_theta * shortage_a
                 + user.inertia * (1.0 if user.platform == "A" else 0.0)
                 + social_a
                 + self.rng.gauss(0.0, self.params.sigma_user)
@@ -349,7 +434,9 @@ class PlatformCompetitionABM:
             v_b = (
                 user.quality_sensitivity * self.params.q_b_user
                 + self.params.alpha * m_b
+                + user.subsidy_sensitivity * subsidy_b
                 - user.price_sensitivity * self.params.p_b_user
+                - self.params.supply_theta * shortage_b
                 + user.inertia * (1.0 if user.platform == "B" else 0.0)
                 + social_b
                 + self.rng.gauss(0.0, self.params.sigma_user)
@@ -358,7 +445,9 @@ class PlatformCompetitionABM:
 
         u_a = self.user_share_a
         for merchant in merchants:
-            subsidy_a = subsidy_amount if merchant.mid in merchant_targets else 0.0
+            targeted_merchant = merchant.mid in merchant_targets
+            subsidy_a = merchant_subsidy_amount if targeted_merchant and self.subsidy_platform == "A" else 0.0
+            subsidy_b = merchant_subsidy_amount if targeted_merchant and self.subsidy_platform == "B" else 0.0
             v_a = (
                 merchant.traffic_sensitivity * self.params.beta * u_a
                 + self.params.q_a_merchant
@@ -370,6 +459,7 @@ class PlatformCompetitionABM:
             v_b = (
                 merchant.traffic_sensitivity * self.params.beta * (1.0 - u_a)
                 + self.params.q_b_merchant
+                + merchant.subsidy_sensitivity * subsidy_b
                 - merchant.commission_sensitivity * self.params.r_b
                 + merchant.inertia * (1.0 if merchant.status == "B_only" else 0.0)
                 + self.rng.gauss(0.0, self.params.sigma_merchant)
@@ -395,7 +485,15 @@ class PlatformCompetitionABM:
             else:
                 merchant.status = "A_only" if self.rng.random() < logit_probability(v_a, v_b, self.params.gamma_merchant) else "B_only"
 
-        return self.collect_metrics()
+        self._update_b_quality(quality_investment)
+        metrics = self.collect_metrics()
+        metrics["period_user_subsidy_spend"] = user_subsidy_amount * len(user_targets)
+        metrics["period_merchant_subsidy_spend"] = merchant_subsidy_amount * len(merchant_targets)
+        metrics["period_quality_investment"] = quality_investment
+        metrics["shortage_A"] = shortage_a
+        metrics["shortage_B"] = shortage_b
+        metrics["q_B"] = self.params.q_b_user
+        return metrics
 
     def collect_metrics(self) -> dict[str, float]:
         l_a = self.combined_share_a
@@ -407,8 +505,11 @@ class PlatformCompetitionABM:
             "merchant_B_only": self.merchant_b_only_share,
             "merchant_multi": self.merchant_multi_share,
             "L_A": l_a,
-            "concentration": l_a * l_a + (1.0 - l_a) * (1.0 - l_a),
+            "concentration": abs(self.user_share_a - 0.5) + abs(self.merchant_presence_a - 0.5),
             "total_subsidy_spend": self.total_subsidy_spend,
+            "shortage_A": self._supply_shortage(self.user_share_a, self.merchant_presence_a),
+            "shortage_B": self._supply_shortage(1.0 - self.user_share_a, self.merchant_presence_b),
+            "q_B": self.params.q_b_user,
         }
 
     def run(self, steps: int = 60) -> pd.DataFrame:

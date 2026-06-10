@@ -21,9 +21,19 @@ COLORS = {
     "red": "#C44E52",
 }
 
-N_USERS = 300
-N_MERCHANTS = 150
+N_USERS = 400
+N_MERCHANTS = 20
 STEPS = 70
+LOCK_THRESHOLD = 0.8
+COEXIST_THRESHOLD = 0.2
+OPTIMAL_STRATEGY_STEPS = 300
+PROFIT_MU = 10.0
+DISCOUNT = 0.98
+STRATEGY_BUDGET = 0.8
+SUPPLY_RHO = 10.0
+SUPPLY_THETA = 1.0
+USER_SCALE = 1000.0
+MERCHANT_SCALE = 50.0
 
 
 def setup_dirs() -> tuple[Path, Path]:
@@ -56,16 +66,23 @@ def set_plot_style() -> None:
     )
 
 
-def lock_state(l_a: float) -> str:
-    if l_a >= 0.8:
-        return "A_lock"
-    if l_a <= 0.2:
-        return "B_lock"
-    return "coexist"
+def lock_state(l_a: float, concentration: float) -> str:
+    if concentration >= LOCK_THRESHOLD:
+        return "A_lock" if l_a >= 0.5 else "B_lock"
+    if concentration < COEXIST_THRESHOLD:
+        return "coexist"
+    return "tilted"
 
 
 def time_to_threshold(df: pd.DataFrame, threshold: float) -> float | None:
     reached = df[df["L_A"] >= threshold]
+    if reached.empty:
+        return None
+    return float(reached["step"].min())
+
+
+def time_to_a_lock(df: pd.DataFrame) -> float | None:
+    reached = df[(df["concentration"] >= LOCK_THRESHOLD) & (df["L_A"] >= 0.5)]
     if reached.empty:
         return None
     return float(reached["step"].min())
@@ -80,6 +97,7 @@ def run_one(condition: dict, seed: int, steps: int = STEPS) -> pd.DataFrame:
         params=condition["params"],
         seed=seed,
         subsidy_policy=condition.get("subsidy_policy", "none"),
+        subsidy_platform=condition.get("subsidy_platform", "A"),
         allow_multi_home=condition.get("allow_multi_home", False),
         multi_home_share=condition.get("multi_home_share", 1.0),
         network_type=condition.get("network_type", "none"),
@@ -104,6 +122,7 @@ def build_model(condition: dict, seed: int) -> PlatformCompetitionABM:
         params=condition["params"],
         seed=seed,
         subsidy_policy=condition.get("subsidy_policy", "none"),
+        subsidy_platform=condition.get("subsidy_platform", "A"),
         allow_multi_home=condition.get("allow_multi_home", False),
         multi_home_share=condition.get("multi_home_share", 1.0),
         network_type=condition.get("network_type", "none"),
@@ -123,14 +142,15 @@ def final_rows(df: pd.DataFrame, condition_cols: list[str], success_threshold: f
         first = group.iloc[0]
         last = group.iloc[-1]
         spend = float(last["total_subsidy_spend"])
+        state = lock_state(float(last["L_A"]), float(last["concentration"]))
         rows.append(
             key_map
             | {
                 "final_L": float(last["L_A"]),
                 "concentration": float(last["concentration"]),
-                "lock_state": lock_state(float(last["L_A"])),
-                "success": float(last["L_A"] >= success_threshold),
-                "time_to_success": time_to_threshold(group, success_threshold),
+                "lock_state": state,
+                "success": float(state == "A_lock"),
+                "time_to_success": time_to_a_lock(group),
                 "total_subsidy_spend": spend,
                 "roi": (float(last["L_A"]) - float(first["L_A"])) / spend if spend > 0 else 0.0,
                 "final_multi_share": float(last["merchant_multi"]),
@@ -152,8 +172,207 @@ def summarize_final(final_df: pd.DataFrame, condition_cols: list[str]) -> pd.Dat
         lock_A_probability=("lock_state", lambda s: float((s == "A_lock").mean())),
         lock_B_probability=("lock_state", lambda s: float((s == "B_lock").mean())),
         coexist_probability=("lock_state", lambda s: float((s == "coexist").mean())),
+        tilted_probability=("lock_state", lambda s: float((s == "tilted").mean())),
     )
     return summary.fillna(0.0)
+
+
+def summarize_b_final(final_df: pd.DataFrame, condition_cols: list[str]) -> pd.DataFrame:
+    df = final_df.copy()
+    df["final_L_B"] = 1.0 - df["final_L"]
+    df["b_break_60"] = (df["final_L_B"] >= 0.6).astype(float)
+    df["b_lock"] = (df["lock_state"] == "B_lock").astype(float)
+    df["roi_b"] = np.where(
+        df["total_subsidy_spend"] > 0,
+        (df["final_L_B"] - (1.0 - 0.8)) / df["total_subsidy_spend"],
+        0.0,
+    )
+    return df.groupby(condition_cols, as_index=False).agg(
+        final_L_B_mean=("final_L_B", "mean"),
+        final_L_B_std=("final_L_B", "std"),
+        concentration_mean=("concentration", "mean"),
+        b_break_probability=("b_break_60", "mean"),
+        b_lock_probability=("b_lock", "mean"),
+        subsidy_spend_mean=("total_subsidy_spend", "mean"),
+        roi_b_mean=("roi_b", "mean"),
+        final_multi_share=("final_multi_share", "mean"),
+        lock_A_probability=("lock_state", lambda s: float((s == "A_lock").mean())),
+        coexist_probability=("lock_state", lambda s: float((s == "coexist").mean())),
+        tilted_probability=("lock_state", lambda s: float((s == "tilted").mean())),
+    ).fillna(0.0)
+
+
+def optimal_strategy_action(
+    strategy: str,
+    *,
+    user_share_b: float,
+    merchant_share_b: float,
+    budget: float = STRATEGY_BUDGET,
+    rho: float = SUPPLY_RHO,
+    eps: float = 1e-6,
+    user_scale: float = USER_SCALE,
+    merchant_scale: float = MERCHANT_SCALE,
+) -> dict[str, float]:
+    if strategy in {"none", "no_strategy"}:
+        return {"user": 0.0, "merchant": 0.0, "quality": 0.0}
+    if strategy in {"merchant_only", "targeted_merchant_only"}:
+        return {"user": 0.0, "merchant": budget, "quality": 0.0}
+    if strategy in {"quality_only", "targeted_quality_only"}:
+        return {"user": 0.0, "merchant": 0.0, "quality": budget}
+    if strategy in {"greedy", "targeted_greedy"}:
+        return {"user": 0.8 * budget, "merchant": 0.1 * budget, "quality": 0.1 * budget}
+    if strategy in {"long_term", "targeted_long_term"}:
+        return {"user": 0.3 * budget, "merchant": 0.4 * budget, "quality": 0.3 * budget}
+    if strategy == "long_term_no_quality":
+        return {"user": (0.3 / 0.7) * budget, "merchant": (0.4 / 0.7) * budget, "quality": 0.0}
+    if strategy in {"dynamic", "targeted_dynamic"}:
+        ratio = (user_share_b * user_scale) / (merchant_share_b * merchant_scale + eps)
+        if ratio > rho:
+            return {"user": 0.2 * budget, "merchant": 0.6 * budget, "quality": 0.2 * budget}
+        if ratio < 0.8 * rho:
+            return {"user": 0.6 * budget, "merchant": 0.2 * budget, "quality": 0.2 * budget}
+        return {"user": 0.3 * budget, "merchant": 0.3 * budget, "quality": 0.4 * budget}
+    if strategy == "dynamic_no_quality":
+        ratio = (user_share_b * user_scale) / (merchant_share_b * merchant_scale + eps)
+        if ratio > rho:
+            return {"user": 0.2 * budget, "merchant": 0.8 * budget, "quality": 0.0}
+        if ratio < 0.8 * rho:
+            return {"user": 0.75 * budget, "merchant": 0.25 * budget, "quality": 0.0}
+        return {"user": 0.5 * budget, "merchant": 0.5 * budget, "quality": 0.0}
+    raise ValueError(f"unknown optimal strategy: {strategy}")
+
+
+def optimal_base_params(
+    *,
+    alpha: float,
+    beta: float,
+    heterogeneity_sigma: float = 0.8,
+    supply_penalty_enabled: bool = True,
+    sigma_user: float = 0.25,
+    sigma_merchant: float = 0.25,
+) -> ExperimentParams:
+    return ExperimentParams(
+        alpha=alpha,
+        beta=beta,
+        heterogeneity_sigma=heterogeneity_sigma,
+        q_a_user=1.0,
+        q_b_user=1.0,
+        q_a_merchant=1.0,
+        q_b_merchant=1.0,
+        subsidy_budget=STRATEGY_BUDGET,
+        max_subsidy_per_agent=999.0,
+        sigma_user=sigma_user,
+        sigma_merchant=sigma_merchant,
+        user_subsidy_segment_multiplier=2.6,
+        merchant_subsidy_segment_multiplier=2.6,
+        supply_penalty_enabled=supply_penalty_enabled,
+        supply_rho=SUPPLY_RHO,
+        supply_theta=SUPPLY_THETA,
+        user_scale=USER_SCALE,
+        merchant_scale=MERCHANT_SCALE,
+        quality_lambda=0.05,
+        quality_decay=0.01,
+        quality_max=3.0,
+    )
+
+
+def run_optimal_strategy_one(condition: dict, seed: int, steps: int = OPTIMAL_STRATEGY_STEPS) -> pd.DataFrame:
+    model = PlatformCompetitionABM(
+        n_users=condition.get("n_users", N_USERS),
+        n_merchants=condition.get("n_merchants", N_MERCHANTS),
+        u0=condition.get("u0", 0.8),
+        m0=condition.get("m0", 0.8),
+        params=condition["params"],
+        seed=seed,
+        subsidy_policy=condition.get("subsidy_policy", "two_sided_targeted"),
+        subsidy_platform="B",
+        allow_multi_home=condition.get("allow_multi_home", False),
+        multi_home_share=condition.get("multi_home_share", 1.0),
+    )
+    rows = []
+    initial = model.collect_metrics() | {
+        "step": 0,
+        "seed": seed,
+        "period_profit_B": 0.0,
+        "discounted_profit_B": 0.0,
+        "period_user_subsidy_spend": 0.0,
+        "period_merchant_subsidy_spend": 0.0,
+        "period_quality_investment": 0.0,
+    }
+    rows.append(initial)
+    cumulative_profit = 0.0
+    for step in range(1, steps + 1):
+        metrics_before = model.collect_metrics()
+        action = optimal_strategy_action(
+            condition["strategy"],
+            user_share_b=1.0 - metrics_before["u_A"],
+            merchant_share_b=metrics_before["merchant_B_presence"],
+            budget=condition.get("budget", STRATEGY_BUDGET),
+        )
+        policy = condition.get("subsidy_policy", "two_sided_targeted")
+        if action["user"] <= 0.0 and action["merchant"] <= 0.0:
+            policy = "none"
+        metrics = model.step(
+            user_subsidy_budget=action["user"],
+            merchant_subsidy_budget=action["merchant"],
+            quality_investment=action["quality"],
+            subsidy_policy=policy,
+        )
+        user_b = 1.0 - metrics["u_A"]
+        merchant_b = metrics["merchant_B_presence"]
+        period_cost = metrics["period_user_subsidy_spend"] + metrics["period_merchant_subsidy_spend"] + metrics["period_quality_investment"]
+        period_profit = PROFIT_MU * user_b * merchant_b - period_cost
+        cumulative_profit += (DISCOUNT**step) * period_profit
+        row = metrics | {
+            "step": step,
+            "seed": seed,
+            "period_profit_B": period_profit,
+            "discounted_profit_B": cumulative_profit,
+        }
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    for key, value in condition.items():
+        if key != "params":
+            df[key] = value
+    return df
+
+
+def summarize_optimal_strategy(runs_df: pd.DataFrame, condition_cols: list[str]) -> pd.DataFrame:
+    final = runs_df.sort_values("step").groupby(condition_cols + ["seed"], as_index=False).tail(1).copy()
+    final["final_L_B"] = 1.0 - final["L_A"]
+    final["b_break_60"] = (final["final_L_B"] >= 0.6).astype(float)
+    final["lock_state"] = final.apply(lambda r: lock_state(float(r["L_A"]), float(r["concentration"])), axis=1)
+    final["b_lock"] = (final["lock_state"] == "B_lock").astype(float)
+    spend = runs_df.groupby(condition_cols + ["seed"], as_index=False).agg(
+        total_user_subsidy=("period_user_subsidy_spend", "sum"),
+        total_merchant_subsidy=("period_merchant_subsidy_spend", "sum"),
+        total_quality_investment=("period_quality_investment", "sum"),
+        max_shortage_B=("shortage_B", "max"),
+        avg_shortage_B=("shortage_B", "mean"),
+    )
+    final = final.merge(spend, on=condition_cols + ["seed"], how="left")
+    final["total_spend"] = final["total_user_subsidy"] + final["total_merchant_subsidy"] + final["total_quality_investment"]
+    summary = final.groupby(condition_cols, as_index=False).agg(
+        final_L_B_mean=("final_L_B", "mean"),
+        final_L_B_std=("final_L_B", "std"),
+        final_user_B_mean=("u_A", lambda s: float((1.0 - s).mean())),
+        final_merchant_B_mean=("merchant_B_presence", "mean"),
+        b_break_probability=("b_break_60", "mean"),
+        b_lock_probability=("b_lock", "mean"),
+        concentration_mean=("concentration", "mean"),
+        discounted_profit_B_mean=("discounted_profit_B", "mean"),
+        discounted_profit_B_std=("discounted_profit_B", "std"),
+        discounted_profit_B_min=("discounted_profit_B", "min"),
+        total_spend_mean=("total_spend", "mean"),
+        total_user_subsidy_mean=("total_user_subsidy", "mean"),
+        total_merchant_subsidy_mean=("total_merchant_subsidy", "mean"),
+        total_quality_investment_mean=("total_quality_investment", "mean"),
+        max_shortage_B_mean=("max_shortage_B", "mean"),
+        avg_shortage_B_mean=("avg_shortage_B", "mean"),
+        q_B_mean=("q_B", "mean"),
+        final_multi_share=("merchant_multi", "mean"),
+    )
+    return summary.fillna(0.0), final
 
 
 def plot_heatmap(
@@ -194,11 +413,11 @@ def experiment_a_critical_heterogeneity(fig_dir: Path, table_dir: Path) -> None:
         condition = {
             "experiment": "A_critical_heterogeneity",
             "heterogeneity_sigma": heterogeneity,
-            "u0": 0.52,
-            "m0": 0.52,
+            "u0": 0.80,
+            "m0": 0.80,
             "params": ExperimentParams(
-                alpha=2.3,
-                beta=2.3,
+                alpha=0.8,
+                beta=0.8,
                 heterogeneity_sigma=heterogeneity,
                 sigma_user=0.25,
                 sigma_merchant=0.25,
@@ -248,9 +467,10 @@ def experiment_a_critical_heterogeneity(fig_dir: Path, table_dir: Path) -> None:
         x,
         summary["lock_A_probability"],
         summary["lock_B_probability"],
+        summary["tilted_probability"],
         summary["coexist_probability"],
-        labels=["A锁定", "B锁定", "共存"],
-        colors=[COLORS["blue"], COLORS["orange"], COLORS["teal"]],
+        labels=["A锁定", "B锁定", "市场倾斜", "共存"],
+        colors=[COLORS["blue"], COLORS["orange"], COLORS["gold"], COLORS["teal"]],
         alpha=0.86,
     )
     ax.set_xlabel("个体异质性强度")
@@ -271,7 +491,7 @@ def experiment_a_critical_heterogeneity(fig_dir: Path, table_dir: Path) -> None:
     upper = (mean_l + std_l).clip(0, 1)
     ax.fill_between(x, lower, upper, color=COLORS["blue"], alpha=0.16, label="均值±标准差")
     ax.plot(x, mean_l, marker="o", linewidth=2.2, color=COLORS["blue"], label="最终 LA 均值")
-    ax.axhline(0.6, color=COLORS["red"], linestyle=":", linewidth=1.4, label="A占优阈值")
+    ax.axhline(0.5, color=COLORS["red"], linestyle=":", linewidth=1.4, label="A/B分界")
     ax.set_xlabel("个体异质性强度")
     ax.set_ylabel("最终平台 A 综合份额")
     ax.set_xticks(x, [f"{v:.2f}" for v in x])
@@ -329,7 +549,7 @@ def experiment_a_critical_heterogeneity(fig_dir: Path, table_dir: Path) -> None:
 
 def experiment_b_equal_budget_subsidy(fig_dir: Path, table_dir: Path) -> None:
     seeds = range(5200, 5230)
-    budgets = [0, 50, 100, 200, 400, 800, 1200]
+    budgets = [0, 20, 50, 80, 100, 150, 200]
     policies = [
         ("none", "无补贴"),
         ("uniform", "统一补贴"),
@@ -345,24 +565,27 @@ def experiment_b_equal_budget_subsidy(fig_dir: Path, table_dir: Path) -> None:
                 "experiment": "B_equal_budget_subsidy",
                 "budget": budget,
                 "subsidy_policy": policy,
+                "subsidy_platform": "B",
                 "policy_label": label,
-                "u0": 0.30,
-                "m0": 0.30,
+                "u0": 0.80,
+                "m0": 0.80,
                 "params": ExperimentParams(
-                    alpha=2.5,
-                    beta=2.5,
+                    alpha=0.8,
+                    beta=0.8,
                     heterogeneity_sigma=0.8,
                     subsidy_budget=float(budget),
                     max_subsidy_per_agent=999.0,
                     sigma_user=0.25,
                     sigma_merchant=0.25,
+                    user_subsidy_segment_multiplier=2.6,
+                    merchant_subsidy_segment_multiplier=2.6,
                 ),
             }
             for seed in seeds:
                 runs.append(run_one(condition, seed))
     runs_df = pd.concat(runs, ignore_index=True)
     final_df = final_rows(runs_df, ["budget", "subsidy_policy", "policy_label"])
-    summary = summarize_final(final_df, ["budget", "subsidy_policy", "policy_label"])
+    summary = summarize_b_final(final_df, ["budget", "subsidy_policy", "policy_label"])
 
     runs_df.to_csv(table_dir / "revised_B_equal_budget_subsidy_runs.csv", index=False, encoding="utf-8-sig")
     final_df.to_csv(table_dir / "revised_B_equal_budget_subsidy_final.csv", index=False, encoding="utf-8-sig")
@@ -370,14 +593,15 @@ def experiment_b_equal_budget_subsidy(fig_dir: Path, table_dir: Path) -> None:
     critical_rows = []
     for policy, label in policies:
         part = summary[summary["subsidy_policy"] == policy].sort_values("budget")
-        reached = part[part["success_probability"] >= 0.5]
+        reached = part[part["b_lock_probability"] >= 0.5]
         critical_rows.append(
             {
                 "subsidy_policy": policy,
                 "policy_label": label,
                 "critical_budget_B_star": float(reached.iloc[0]["budget"]) if not reached.empty else np.nan,
-                "max_success_probability": float(part["success_probability"].max()),
-                "best_roi": float(part["roi_mean"].max()),
+                "max_b_lock_probability": float(part["b_lock_probability"].max()),
+                "max_b_break_probability": float(part["b_break_probability"].max()),
+                "best_roi_b": float(part["roi_b_mean"].max()),
             }
         )
     critical_df = pd.DataFrame(critical_rows)
@@ -387,13 +611,13 @@ def experiment_b_equal_budget_subsidy(fig_dir: Path, table_dir: Path) -> None:
     palette = [COLORS["gray"], COLORS["blue"], COLORS["gold"], COLORS["teal"], COLORS["purple"], COLORS["orange"]]
     for (policy, label), color in zip(policies, palette):
         part = summary[summary["subsidy_policy"] == policy].sort_values("budget")
-        ax.plot(part["budget"], part["success_probability"], marker="o", linewidth=2.0, color=color, label=label)
+        ax.plot(part["budget"], part["b_lock_probability"], marker="o", linewidth=2.0, color=color, label=label)
     ax.set_xlabel("每期补贴预算 B")
-    ax.set_ylabel("跨越 L_A > 0.6 的概率")
+    ax.set_ylabel("B锁定概率（C>=0.8）")
     ax.set_ylim(0, 1.03)
     ax.grid(True, alpha=0.55)
     ax.legend(ncol=2, loc="lower right")
-    ax.set_title("实验B：等预算下不同补贴策略的成功概率", fontsize=13, pad=12)
+    ax.set_title("等预算下不同补贴策略的 B 锁定概率", fontsize=13, pad=12)
     fig.tight_layout()
     fig.savefig(fig_dir / "revised_B_budget_success_curves.png")
     plt.close(fig)
@@ -401,13 +625,13 @@ def experiment_b_equal_budget_subsidy(fig_dir: Path, table_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(9.3, 5.4))
     for (policy, label), color in zip(policies[1:], palette[1:]):
         part = summary[(summary["subsidy_policy"] == policy) & (summary["budget"] > 0)].sort_values("budget")
-        ax.plot(part["budget"], part["roi_mean"], marker="s", linewidth=2.0, color=color, label=label)
+        ax.plot(part["budget"], part["roi_b_mean"], marker="s", linewidth=2.0, color=color, label=label)
     ax.axhline(0, color="#444444", linewidth=1.0)
     ax.set_xlabel("每期补贴预算 B")
     ax.set_ylabel("ROI")
     ax.grid(True, alpha=0.55)
     ax.legend(ncol=2, loc="best")
-    ax.set_title("实验B：等预算下不同补贴策略的 ROI", fontsize=13, pad=12)
+    ax.set_title("等预算下不同补贴策略的 B 视角 ROI", fontsize=13, pad=12)
     fig.tight_layout()
     fig.savefig(fig_dir / "revised_B_budget_roi_curves.png")
     plt.close(fig)
@@ -417,12 +641,14 @@ def experiment_c_cold_start_heatmap(fig_dir: Path, table_dir: Path) -> None:
     seeds = range(5300, 5320)
     grid = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
     runs = []
-    for u0 in grid:
-        for m0 in grid:
+    for b_u0 in grid:
+        for b_m0 in grid:
             condition = {
                 "experiment": "C_cold_start_heatmap",
-                "u0": u0,
-                "m0": m0,
+                "b_u0": b_u0,
+                "b_m0": b_m0,
+                "u0": 1.0 - b_u0,
+                "m0": 1.0 - b_m0,
                 "params": ExperimentParams(
                     alpha=2.7,
                     beta=2.7,
@@ -431,37 +657,35 @@ def experiment_c_cold_start_heatmap(fig_dir: Path, table_dir: Path) -> None:
                     sigma_merchant=0.25,
                     initial_a_inertia_boost=1.2,
                 ),
-                "n_users": 260,
-                "n_merchants": 130,
             }
             for seed in seeds:
                 runs.append(run_one(condition, seed))
     runs_df = pd.concat(runs, ignore_index=True)
-    final_df = final_rows(runs_df, ["u0", "m0"], success_threshold=0.6)
-    summary = summarize_final(final_df, ["u0", "m0"])
+    final_df = final_rows(runs_df, ["b_u0", "b_m0"], success_threshold=0.6)
+    summary = summarize_b_final(final_df, ["b_u0", "b_m0"])
 
     runs_df.to_csv(table_dir / "revised_C_cold_start_heatmap_runs.csv", index=False, encoding="utf-8-sig")
     final_df.to_csv(table_dir / "revised_C_cold_start_heatmap_final.csv", index=False, encoding="utf-8-sig")
     summary.to_csv(table_dir / "revised_C_cold_start_heatmap_summary.csv", index=False, encoding="utf-8-sig")
 
-    success_pivot = summary.pivot(index="m0", columns="u0", values="success_probability").sort_index().sort_index(axis=1)
-    final_pivot = summary.pivot(index="m0", columns="u0", values="final_L_mean").sort_index().sort_index(axis=1)
+    success_pivot = summary.pivot(index="b_m0", columns="b_u0", values="b_break_probability").sort_index().sort_index(axis=1)
+    final_pivot = summary.pivot(index="b_m0", columns="b_u0", values="final_L_B_mean").sort_index().sort_index(axis=1)
     plot_heatmap(
         success_pivot,
         fig_path=fig_dir / "revised_C_cold_start_success_heatmap.png",
-        title="实验C：冷启动成功概率热力图",
-        xlabel="初始用户份额 u_A(0)",
-        ylabel="初始商户份额 m_A(0)",
-        cbar_label="P(L_A>0.6)",
+        title="B 冷启动打破锁定概率热力图",
+        xlabel="B 初始用户份额 u_B(0)",
+        ylabel="B 初始商户份额 m_B(0)",
+        cbar_label="P(L_B>=0.6)",
         cmap="YlGnBu",
     )
     plot_heatmap(
         final_pivot,
         fig_path=fig_dir / "revised_C_cold_start_final_L_heatmap.png",
-        title="实验C：最终平台 A 综合份额热力图",
-        xlabel="初始用户份额 u_A(0)",
-        ylabel="初始商户份额 m_A(0)",
-        cbar_label="最终 L_A 均值",
+        title="B 冷启动最终 L_B 热力图",
+        xlabel="B 初始用户份额 u_B(0)",
+        ylabel="B 初始商户份额 m_B(0)",
+        cbar_label="最终 L_B 均值",
         cmap="YlOrRd",
     )
 
@@ -493,8 +717,6 @@ def experiment_c_seed_quality_scan(fig_dir: Path, table_dir: Path) -> None:
                     sigma_merchant=0.25,
                     initial_a_inertia_boost=boost,
                 ),
-                "n_users": 260,
-                "n_merchants": 130,
             }
             for seed in seeds:
                 runs.append(run_one(condition, seed))
@@ -524,7 +746,7 @@ def experiment_c_seed_quality_scan(fig_dir: Path, table_dir: Path) -> None:
 def experiment_d_multi_home_threshold(fig_dir: Path, table_dir: Path) -> None:
     seeds = range(5400, 5430)
     costs = [0.0, 0.2, 0.5, 0.8, 1.2, 1.6, 2.0]
-    rhos = [0.3, 0.5, 0.7, 0.9, 1.0]
+    rhos = [0.5]
     runs = []
     for cost in costs:
         for rho in rhos:
@@ -532,13 +754,13 @@ def experiment_d_multi_home_threshold(fig_dir: Path, table_dir: Path) -> None:
                 "experiment": "D_multi_home_threshold",
                 "multi_home_cost": cost,
                 "rho": rho,
-                "u0": 0.52,
-                "m0": 0.52,
+                "u0": 0.80,
+                "m0": 0.80,
                 "allow_multi_home": True,
                 "multi_home_share": 1.0,
                 "params": ExperimentParams(
-                    alpha=2.3,
-                    beta=2.3,
+                    alpha=0.8,
+                    beta=0.8,
                     heterogeneity_sigma=0.5,
                     multi_home_cost=cost,
                     multi_home_visibility=rho,
@@ -593,13 +815,13 @@ def experiment_d_multi_home_paths(fig_dir: Path, table_dir: Path) -> None:
             "multi_home_cost": cost,
             "rho": rho,
             "scenario_label": label,
-            "u0": 0.52,
-            "m0": 0.52,
+            "u0": 0.80,
+            "m0": 0.80,
             "allow_multi_home": True,
             "multi_home_share": 1.0,
             "params": ExperimentParams(
-                alpha=2.3,
-                beta=2.3,
+                alpha=0.8,
+                beta=0.8,
                 heterogeneity_sigma=0.5,
                 multi_home_cost=cost,
                 multi_home_visibility=rho,
@@ -654,11 +876,11 @@ def experiment_b_paper_budget_fine_scan(fig_dir: Path, table_dir: Path) -> None:
                 "budget": budget,
                 "subsidy_policy": policy,
                 "policy_label": label,
-                "u0": 0.30,
-                "m0": 0.30,
+                "u0": 0.80,
+                "m0": 0.80,
                 "params": ExperimentParams(
-                    alpha=2.5,
-                    beta=2.5,
+                    alpha=0.8,
+                    beta=0.8,
                     heterogeneity_sigma=0.8,
                     subsidy_budget=float(budget),
                     max_subsidy_per_agent=999.0,
@@ -695,9 +917,9 @@ def experiment_b_paper_budget_fine_scan(fig_dir: Path, table_dir: Path) -> None:
     for (policy, label), color in zip(policies, palette):
         part = summary[summary["subsidy_policy"] == policy].sort_values("budget")
         ax.plot(part["budget"], part["success_probability"], marker="o", linewidth=2.2, color=color, label=label)
-    ax.axhline(0.5, color=COLORS["red"], linestyle=":", linewidth=1.3, label="50%成功阈值")
+    ax.axhline(0.5, color=COLORS["red"], linestyle=":", linewidth=1.3, label="50%A锁定阈值")
     ax.set_xlabel("每期补贴预算 B")
-    ax.set_ylabel("跨越 L_A > 0.6 的概率")
+    ax.set_ylabel("A锁定概率（C>=0.8）")
     ax.set_ylim(0, 1.03)
     ax.grid(True, alpha=0.55)
     ax.legend(loc="lower right")
@@ -739,8 +961,6 @@ def experiment_c_paper_cold_start_fine_heatmap(fig_dir: Path, table_dir: Path) -
                     sigma_merchant=0.25,
                     initial_a_inertia_boost=1.2,
                 ),
-                "n_users": 260,
-                "n_merchants": 130,
             }
             for seed in seeds:
                 runs.append(run_one(condition, seed))
@@ -759,7 +979,7 @@ def experiment_c_paper_cold_start_fine_heatmap(fig_dir: Path, table_dir: Path) -
         title="冷启动成功概率细粒度热力图",
         xlabel="初始用户份额 u_A(0)",
         ylabel="初始商户份额 m_A(0)",
-        cbar_label="P(L_A>0.6)",
+        cbar_label="A锁定概率（C>=0.8）",
         cmap="YlGnBu",
     )
     plot_heatmap(
@@ -776,7 +996,7 @@ def experiment_c_paper_cold_start_fine_heatmap(fig_dir: Path, table_dir: Path) -
 def experiment_d_paper_multi_home_fine_heatmap(fig_dir: Path, table_dir: Path) -> None:
     seeds = range(6300, 6350)
     costs = [0.0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
-    rhos = [0.3, 0.4, 0.5, 0.6, 0.7]
+    rhos = [0.5]
     runs = []
     for cost in costs:
         for rho in rhos:
@@ -784,13 +1004,13 @@ def experiment_d_paper_multi_home_fine_heatmap(fig_dir: Path, table_dir: Path) -
                 "experiment": "paper_D_multi_home_fine_heatmap",
                 "multi_home_cost": cost,
                 "rho": rho,
-                "u0": 0.52,
-                "m0": 0.52,
+                "u0": 0.80,
+                "m0": 0.80,
                 "allow_multi_home": True,
                 "multi_home_share": 1.0,
                 "params": ExperimentParams(
-                    alpha=2.3,
-                    beta=2.3,
+                    alpha=0.8,
+                    beta=0.8,
                     heterogeneity_sigma=0.5,
                     multi_home_cost=cost,
                     multi_home_visibility=rho,
@@ -837,7 +1057,7 @@ def experiment_quality_advantage(fig_dir: Path, table_dir: Path) -> None:
         ("user_quality", "用户侧质量优势", True, False, "none", 0.0),
         ("merchant_quality", "商户侧质量优势", False, True, "none", 0.0),
         ("two_sided_quality", "双边质量优势", True, True, "none", 0.0),
-        ("quality_plus_subsidy", "双边质量+少量精准补贴", True, True, "two_sided_targeted", 80.0),
+        ("quality_plus_subsidy", "双边质量+少量精准补贴", True, True, "two_sided_targeted", 20.0),
     ]
     runs = []
     user_segments = []
@@ -845,29 +1065,30 @@ def experiment_quality_advantage(fig_dir: Path, table_dir: Path) -> None:
     for delta_q in deltas:
         for strategy, label, user_quality, merchant_quality, subsidy_policy, budget in strategies:
             params = ExperimentParams(
-                alpha=2.5,
-                beta=2.5,
+                alpha=0.8,
+                beta=0.8,
                 heterogeneity_sigma=0.8,
-                q_a_user=delta_q if user_quality else 0.0,
-                q_b_user=0.0,
-                q_a_merchant=delta_q if merchant_quality else 0.0,
-                q_b_merchant=0.0,
+                q_a_user=0.0,
+                q_b_user=delta_q if user_quality else 0.0,
+                q_a_merchant=0.0,
+                q_b_merchant=delta_q if merchant_quality else 0.0,
                 subsidy_budget=budget,
                 max_subsidy_per_agent=999.0,
-                sigma_user=0.25,
-                sigma_merchant=0.25,
-            )
+                    sigma_user=0.25,
+                    sigma_merchant=0.25,
+                    user_subsidy_segment_multiplier=2.6,
+                    merchant_subsidy_segment_multiplier=2.6,
+                )
             condition = {
                 "experiment": "quality_advantage",
                 "delta_q": delta_q,
                 "quality_strategy": strategy,
                 "quality_label": label,
-                "u0": 0.30,
-                "m0": 0.30,
-                "n_users": 220,
-                "n_merchants": 110,
+                "u0": 0.80,
+                "m0": 0.80,
                 "params": params,
                 "subsidy_policy": subsidy_policy,
+                "subsidy_platform": "B",
             }
             for seed in seeds:
                 model = build_model(condition, seed)
@@ -895,7 +1116,17 @@ def experiment_quality_advantage(fig_dir: Path, table_dir: Path) -> None:
 
     runs_df = pd.concat(runs, ignore_index=True)
     final_df = final_rows(runs_df, ["delta_q", "quality_strategy", "quality_label"], success_threshold=0.6)
+    final_df["b_success"] = (final_df["lock_state"] == "B_lock").astype(float)
+    final_df["final_L_B"] = 1.0 - final_df["final_L"]
+    final_df["b_break_60"] = (final_df["final_L_B"] >= 0.6).astype(float)
     summary = summarize_final(final_df, ["delta_q", "quality_strategy", "quality_label"])
+    b_summary = final_df.groupby(["delta_q", "quality_strategy", "quality_label"], as_index=False).agg(
+        b_success_probability=("b_break_60", "mean"),
+        b_lock_probability=("b_success", "mean"),
+        final_L_B_mean=("final_L_B", "mean"),
+        final_L_B_std=("final_L_B", "std"),
+    )
+    summary = summary.merge(b_summary, on=["delta_q", "quality_strategy", "quality_label"], how="left")
     runs_df.to_csv(table_dir / "abm_quality_advantage_runs.csv", index=False, encoding="utf-8-sig")
     final_df.to_csv(table_dir / "abm_quality_advantage_final.csv", index=False, encoding="utf-8-sig")
     summary.to_csv(table_dir / "abm_quality_advantage_summary.csv", index=False, encoding="utf-8-sig")
@@ -903,14 +1134,15 @@ def experiment_quality_advantage(fig_dir: Path, table_dir: Path) -> None:
     critical_rows = []
     for strategy, label, *_ in strategies:
         part = summary[summary["quality_strategy"] == strategy].sort_values("delta_q")
-        reached = part[part["success_probability"] >= 0.5]
+        reached = part[part["b_success_probability"] >= 0.5]
         critical_rows.append(
             {
                 "quality_strategy": strategy,
                 "quality_label": label,
                 "critical_delta_q": float(reached.iloc[0]["delta_q"]) if not reached.empty else np.nan,
-                "max_success_probability": float(part["success_probability"].max()),
-                "max_final_L_mean": float(part["final_L_mean"].max()),
+                "max_b_success_probability": float(part["b_success_probability"].max()),
+                "max_b_lock_probability": float(part["b_lock_probability"].max()),
+                "max_final_L_B_mean": float(part["final_L_B_mean"].max()),
             }
         )
     pd.DataFrame(critical_rows).to_csv(table_dir / "abm_quality_advantage_critical.csv", index=False, encoding="utf-8-sig")
@@ -939,14 +1171,14 @@ def experiment_quality_advantage(fig_dir: Path, table_dir: Path) -> None:
     palette = [COLORS["gray"], COLORS["blue"], COLORS["teal"], COLORS["orange"], COLORS["purple"]]
     for (strategy, label, *_), color in zip(strategies, palette):
         part = summary[summary["quality_strategy"] == strategy].sort_values("delta_q")
-        ax.plot(part["delta_q"], part["success_probability"], marker="o", linewidth=2.1, color=color, label=label)
+        ax.plot(part["delta_q"], part["b_success_probability"], marker="o", linewidth=2.1, color=color, label=label)
     ax.axhline(0.5, color=COLORS["red"], linestyle=":", linewidth=1.3, label="50%成功阈值")
-    ax.set_xlabel("平台 A 服务质量优势 Δq")
-    ax.set_ylabel("A 成功概率")
+    ax.set_xlabel("平台 B 相对 A 的服务质量优势 Δq")
+    ax.set_ylabel("B打破锁定概率（L_B>=0.6）")
     ax.set_ylim(-0.03, 1.03)
     ax.grid(True, alpha=0.52)
     ax.legend(loc="lower right", ncol=2)
-    ax.set_title("服务质量优势对弱势平台逆袭概率的影响", fontsize=13, pad=12)
+    ax.set_title("服务质量优势对平台 B 逆袭概率的影响", fontsize=13, pad=12)
     fig.tight_layout()
     fig.savefig(fig_dir / "abm_quality_advantage_success_curves.png")
     plt.close(fig)
@@ -954,14 +1186,14 @@ def experiment_quality_advantage(fig_dir: Path, table_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(9.2, 5.4))
     for (strategy, label, *_), color in zip(strategies, palette):
         part = summary[summary["quality_strategy"] == strategy].sort_values("delta_q")
-        ax.plot(part["delta_q"], part["final_L_mean"], marker="s", linewidth=2.1, color=color, label=label)
-    ax.axhline(0.6, color=COLORS["red"], linestyle=":", linewidth=1.3, label="A占优阈值")
-    ax.set_xlabel("平台 A 服务质量优势 Δq")
-    ax.set_ylabel("最终 L_A 均值")
+        ax.plot(part["delta_q"], part["final_L_B_mean"], marker="s", linewidth=2.1, color=color, label=label)
+    ax.axhline(0.5, color=COLORS["red"], linestyle=":", linewidth=1.3, label="A/B分界")
+    ax.set_xlabel("平台 B 相对 A 的服务质量优势 Δq")
+    ax.set_ylabel("最终 L_B 均值")
     ax.set_ylim(-0.03, 1.03)
     ax.grid(True, alpha=0.52)
     ax.legend(loc="lower right", ncol=2)
-    ax.set_title("服务质量优势对最终综合份额的影响", fontsize=13, pad=12)
+    ax.set_title("服务质量优势对平台 B 最终综合份额的影响", fontsize=13, pad=12)
     fig.tight_layout()
     fig.savefig(fig_dir / "abm_quality_advantage_final_L.png")
     plt.close(fig)
@@ -983,71 +1215,131 @@ def experiment_quality_advantage(fig_dir: Path, table_dir: Path) -> None:
         plt.close(fig)
 
 
+def experiment_optimal_strategy_validation(fig_dir: Path, table_dir: Path) -> None:
+    seeds = range(7600, 7620)
+    networks = [
+        ("medium", "中等网络效应", 0.8, 0.8),
+        ("strong", "强网络效应", 1.5, 1.5),
+    ]
+    strategies = [
+        ("targeted_greedy", "针对性贪心"),
+        ("targeted_long_term", "针对性长期"),
+        ("targeted_dynamic", "针对性动态"),
+        ("quality_only", "纯质量投资"),
+        ("targeted_merchant_only", "针对性商户补贴"),
+        ("none", "无策略"),
+    ]
+    ode_profit_reference = {
+        ("medium", "targeted_greedy"): 73.02,
+        ("medium", "targeted_long_term"): 178.52,
+        ("medium", "targeted_dynamic"): 193.53,
+        ("medium", "quality_only"): 191.66,
+        ("medium", "targeted_merchant_only"): 211.55,
+        ("strong", "targeted_greedy"): -26.64,
+        ("strong", "targeted_long_term"): 124.48,
+        ("strong", "targeted_dynamic"): 151.57,
+        ("strong", "quality_only"): 152.16,
+    }
+    runs = []
+    for network, network_label, alpha, beta in networks:
+        for strategy, strategy_label in strategies:
+            condition = {
+                "experiment": "optimal_strategy_validation",
+                "network": network,
+                "network_label": network_label,
+                "strategy": strategy,
+                "strategy_label": strategy_label,
+                "u0": 0.80,
+                "m0": 0.80,
+                "budget": STRATEGY_BUDGET,
+                "params": optimal_base_params(alpha=alpha, beta=beta),
+                "subsidy_policy": "two_sided_targeted" if strategy != "none" else "none",
+            }
+            for seed in seeds:
+                runs.append(run_optimal_strategy_one(condition, seed))
+    runs_df = pd.concat(runs, ignore_index=True)
+    summary, final_df = summarize_optimal_strategy(runs_df, ["network", "network_label", "strategy", "strategy_label"])
+    summary["ode_discounted_profit_B"] = summary.apply(
+        lambda r: ode_profit_reference.get((r["network"], r["strategy"]), np.nan), axis=1
+    )
+    summary["profit_gap_abm_minus_ode"] = summary["discounted_profit_B_mean"] - summary["ode_discounted_profit_B"]
+
+    runs_df.to_csv(table_dir / "abm_optimal_strategy_validation_runs.csv", index=False, encoding="utf-8-sig")
+    final_df.to_csv(table_dir / "abm_optimal_strategy_validation_final.csv", index=False, encoding="utf-8-sig")
+    summary.to_csv(table_dir / "abm_optimal_strategy_validation_summary.csv", index=False, encoding="utf-8-sig")
+
+    order = [s[0] for s in strategies]
+    summary["strategy"] = pd.Categorical(summary["strategy"], categories=order, ordered=True)
+    fig, axes = plt.subplots(1, 2, figsize=(13.2, 5.2), sharey=True)
+    for ax, (network, network_label, _, _) in zip(axes, networks):
+        part = summary[summary["network"] == network].sort_values("strategy")
+        x = np.arange(len(part))
+        ax.bar(x, part["discounted_profit_B_mean"], color=COLORS["blue"], alpha=0.86, label="ABM均值")
+        ax.errorbar(x, part["discounted_profit_B_mean"], yerr=part["discounted_profit_B_std"], fmt="none", ecolor="#333333", capsize=4)
+        ref = part["ode_discounted_profit_B"]
+        ax.scatter(x, ref, color=COLORS["orange"], marker="D", s=42, label="ODE参考")
+        ax.set_xticks(x, part["strategy_label"], rotation=20, ha="right")
+        ax.axhline(0, color="#444444", linewidth=1.0)
+        ax.grid(True, axis="y", alpha=0.45)
+        ax.set_title(network_label, fontsize=12, pad=10)
+    axes[0].set_ylabel("贴现利润 $\\Pi_B$")
+    axes[0].legend(loc="upper left")
+    fig.suptitle("ODE 最优策略组合在 ABM 中的贴现利润表现", fontsize=13, y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(fig_dir / "abm_optimal_strategy_profit_compare.png")
+    plt.close(fig)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.2, 5.2), sharey=True)
+    for ax, (network, network_label, _, _) in zip(axes, networks):
+        part = summary[summary["network"] == network].sort_values("strategy")
+        x = np.arange(len(part))
+        width = 0.36
+        ax.bar(x - width / 2, part["final_L_B_mean"], width, color=COLORS["teal"], label="最终 $L_B$")
+        ax.bar(x + width / 2, part["b_break_probability"], width, color=COLORS["purple"], label="$P(L_B\\geq0.6)$")
+        ax.set_xticks(x, part["strategy_label"], rotation=20, ha="right")
+        ax.axhline(0.6, color=COLORS["red"], linestyle=":", linewidth=1.2)
+        ax.set_ylim(0, 1.05)
+        ax.grid(True, axis="y", alpha=0.45)
+        ax.set_title(network_label, fontsize=12, pad=10)
+    axes[0].set_ylabel("份额/概率")
+    axes[0].legend(loc="lower right")
+    fig.suptitle("ODE 最优策略组合在 ABM 中的份额稳健性", fontsize=13, y=0.98)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.savefig(fig_dir / "abm_optimal_strategy_share_compare.png")
+    plt.close(fig)
+
+
 def experiment_mechanism_ablation(fig_dir: Path, table_dir: Path) -> None:
-    seeds = range(7100, 7130)
+    seeds = range(7900, 7920)
     versions = [
-        (
-            "Full ABM",
-            "保留全部机制",
-            ExperimentParams(alpha=2.5, beta=2.5, heterogeneity_sigma=0.8, subsidy_budget=140.0, max_subsidy_per_agent=999.0, multi_home_cost=0.10, multi_home_visibility=0.40, sigma_user=0.25, sigma_merchant=0.25),
-            "two_sided_targeted",
-            True,
-        ),
-        (
-            "w/o heterogeneity",
-            "去掉个体异质性",
-            ExperimentParams(alpha=2.5, beta=2.5, heterogeneity_sigma=0.0, subsidy_budget=140.0, max_subsidy_per_agent=999.0, multi_home_cost=0.10, multi_home_visibility=0.40, sigma_user=0.25, sigma_merchant=0.25),
-            "two_sided_targeted",
-            True,
-        ),
-        (
-            "w/o inertia",
-            "去掉惯性/切换成本",
-            ExperimentParams(alpha=2.5, beta=2.5, heterogeneity_sigma=0.8, subsidy_budget=140.0, max_subsidy_per_agent=999.0, multi_home_cost=0.10, multi_home_visibility=0.40, sigma_user=0.25, sigma_merchant=0.25, user_inertia_mean=0.0, merchant_inertia_mean=0.0),
-            "two_sided_targeted",
-            True,
-        ),
-        (
-            "w/o targeted rule",
-            "精准补贴改为随机补贴",
-            ExperimentParams(alpha=2.5, beta=2.5, heterogeneity_sigma=0.8, subsidy_budget=140.0, max_subsidy_per_agent=999.0, multi_home_cost=0.10, multi_home_visibility=0.40, sigma_user=0.25, sigma_merchant=0.25),
-            "random",
-            True,
-        ),
-        (
-            "w/o multi-home",
-            "商户不可多归属",
-            ExperimentParams(alpha=2.5, beta=2.5, heterogeneity_sigma=0.8, subsidy_budget=140.0, max_subsidy_per_agent=999.0, sigma_user=0.25, sigma_merchant=0.25),
-            "two_sided_targeted",
-            False,
-        ),
-        (
-            "w/o network effect",
-            "去掉双边网络效应",
-            ExperimentParams(alpha=0.0, beta=0.0, heterogeneity_sigma=0.8, subsidy_budget=140.0, max_subsidy_per_agent=999.0, multi_home_cost=0.10, multi_home_visibility=0.40, sigma_user=0.25, sigma_merchant=0.25),
-            "two_sided_targeted",
-            True,
-        ),
+        ("Full targeted long-term", "完整：针对性长期补贴+质量投资+供给惩罚", "targeted_long_term", "two_sided_targeted", optimal_base_params(alpha=0.8, beta=0.8)),
+        ("w/o targeting", "去掉精准规则，改为统一补贴", "targeted_long_term", "uniform", optimal_base_params(alpha=0.8, beta=0.8)),
+        ("replace by dynamic", "长期固定配比改为动态配比", "targeted_dynamic", "two_sided_targeted", optimal_base_params(alpha=0.8, beta=0.8)),
+        ("replace by greedy", "长期配比改为偏用户贪心配比", "targeted_greedy", "two_sided_targeted", optimal_base_params(alpha=0.8, beta=0.8)),
+        ("w/o quality investment", "去掉质量投资，预算转入双边补贴", "long_term_no_quality", "two_sided_targeted", optimal_base_params(alpha=0.8, beta=0.8)),
+        ("w/o supply penalty", "去掉供给不足惩罚", "targeted_long_term", "two_sided_targeted", optimal_base_params(alpha=0.8, beta=0.8, supply_penalty_enabled=False)),
+        ("w/o heterogeneity", "去掉个体异质性", "targeted_long_term", "two_sided_targeted", optimal_base_params(alpha=0.8, beta=0.8, heterogeneity_sigma=0.0)),
+        ("w/o network effect", "去掉双边网络效应", "targeted_long_term", "two_sided_targeted", optimal_base_params(alpha=0.0, beta=0.0)),
     ]
     runs = []
-    for version, removed_mechanism, params, policy, allow_multi_home in versions:
+    for version, removed_mechanism, strategy, policy, params in versions:
         condition = {
-            "experiment": "mechanism_ablation",
+            "experiment": "optimal_strategy_ablation",
             "version": version,
             "removed_mechanism": removed_mechanism,
-            "u0": 0.30,
-            "m0": 0.30,
+            "strategy": strategy,
+            "strategy_label": version,
+            "u0": 0.80,
+            "m0": 0.80,
+            "budget": STRATEGY_BUDGET,
             "params": params,
             "subsidy_policy": policy,
-            "allow_multi_home": allow_multi_home,
-            "multi_home_share": 1.0,
         }
         for seed in seeds:
-            runs.append(run_one(condition, seed))
+            runs.append(run_optimal_strategy_one(condition, seed))
 
     runs_df = pd.concat(runs, ignore_index=True)
-    final_df = final_rows(runs_df, ["version", "removed_mechanism"], success_threshold=0.6)
-    summary = summarize_final(final_df, ["version", "removed_mechanism"])
+    summary, final_df = summarize_optimal_strategy(runs_df, ["version", "removed_mechanism", "strategy"])
     order = [v[0] for v in versions]
     summary["version"] = pd.Categorical(summary["version"], categories=order, ordered=True)
     summary = summary.sort_values("version")
@@ -1056,41 +1348,59 @@ def experiment_mechanism_ablation(fig_dir: Path, table_dir: Path) -> None:
     final_df.to_csv(table_dir / "abm_mechanism_ablation_final.csv", index=False, encoding="utf-8-sig")
     summary.to_csv(table_dir / "abm_mechanism_ablation_summary.csv", index=False, encoding="utf-8-sig")
 
-    fig, ax = plt.subplots(figsize=(9.4, 5.4))
+    fig, ax = plt.subplots(figsize=(10.2, 5.4))
     x = np.arange(len(summary))
     width = 0.36
-    ax.bar(x - width / 2, summary["success_probability"], width, color=COLORS["blue"], label="成功概率")
-    ax.bar(x + width / 2, summary["lock_A_probability"], width, color=COLORS["orange"], label="A锁定概率")
+    ax.bar(x - width / 2, summary["discounted_profit_B_mean"], width, color=COLORS["blue"], label="贴现利润")
+    ax.errorbar(x - width / 2, summary["discounted_profit_B_mean"], yerr=summary["discounted_profit_B_std"], fmt="none", ecolor="#333333", capsize=3)
+    ax2 = ax.twinx()
+    ax2.bar(x + width / 2, summary["b_break_probability"], width, color=COLORS["orange"], alpha=0.78, label="打破锁定概率")
     ax.set_xticks(x, summary["version"], rotation=20, ha="right")
-    ax.set_ylim(0, 1.05)
-    ax.set_ylabel("概率")
+    ax.set_ylabel("贴现利润 $\\Pi_B$")
+    ax2.set_ylabel("$P(L_B\\geq0.6)$")
+    ax2.set_ylim(0, 1.05)
     ax.grid(True, axis="y", alpha=0.45)
-    ax.legend(loc="upper right")
-    ax.set_title("机制消融：去掉关键机制后的结果变化", fontsize=13, pad=12)
-    for idx, value in enumerate(summary["success_probability"]):
-        ax.text(idx - width / 2, min(value + 0.03, 1.03), f"{value:.2f}", ha="center", va="bottom", fontsize=8)
+    handles1, labels1 = ax.get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(handles1 + handles2, labels1 + labels2, loc="upper left")
+    ax.set_title("最优策略组合消融：利润与打破锁定概率", fontsize=13, pad=12)
     fig.tight_layout()
     fig.savefig(fig_dir / "abm_mechanism_ablation_probabilities.png")
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(9.4, 5.2))
+    fig, ax = plt.subplots(figsize=(10.2, 5.2))
+    ax_shortage = ax.twinx()
     ax.errorbar(
         x,
-        summary["final_L_mean"],
-        yerr=summary["final_L_std"],
+        summary["final_L_B_mean"],
+        yerr=summary["final_L_B_std"],
         fmt="o-",
         color=COLORS["teal"],
         ecolor="#91C9C0",
         capsize=4,
         linewidth=2.0,
+        label="最终 $L_B$",
     )
-    ax.axhline(0.6, color=COLORS["red"], linestyle=":", linewidth=1.3, label="成功阈值")
+    ax_shortage.plot(
+        x,
+        summary["max_shortage_B_mean"],
+        "s--",
+        color=COLORS["red"],
+        linewidth=1.6,
+        label="最大供给不足",
+    )
+    ax.axhline(0.6, color=COLORS["gray"], linestyle=":", linewidth=1.2, label="打破锁定线")
     ax.set_xticks(x, summary["version"], rotation=20, ha="right")
     ax.set_ylim(0, 1.05)
-    ax.set_ylabel("最终 L_A")
+    ax.set_ylabel("最终 $L_B$")
+    ax_shortage.set_yscale("symlog", linthresh=1.0)
+    ax_shortage.set_ylim(0, max(1.0, float(summary["max_shortage_B_mean"].max())) * 2.0)
+    ax_shortage.set_ylabel("最大供给不足 $C_B$（symlog）")
     ax.grid(True, axis="y", alpha=0.45)
-    ax.legend(loc="lower right")
-    ax.set_title("机制消融：最终综合份额均值与波动", fontsize=13, pad=12)
+    lines, labels = ax.get_legend_handles_labels()
+    lines2, labels2 = ax_shortage.get_legend_handles_labels()
+    ax.legend(lines + lines2, labels + labels2, loc="upper left")
+    ax.set_title("最优策略组合消融：最终份额与供给压力", fontsize=13, pad=12)
     fig.tight_layout()
     fig.savefig(fig_dir / "abm_mechanism_ablation_final_L.png")
     plt.close(fig)
@@ -1115,9 +1425,9 @@ def ode_l_path(alpha: float, beta: float, u0: float, m0: float, steps: int = STE
 def experiment_abm_ode_comparison(fig_dir: Path, table_dir: Path) -> None:
     seeds = range(7200, 7230)
     scenarios = [
-        ("弱网络效应", 0.8, 0.8, 0.50, 0.50),
-        ("强网络效应", 2.8, 2.8, 0.55, 0.55),
-        ("冷启动临界区", 2.3, 2.3, 0.52, 0.52),
+        ("弱网络效应", 0.3, 0.3, 0.80, 0.80),
+        ("强网络效应", 1.5, 1.5, 0.80, 0.80),
+        ("中等网络效应", 0.8, 0.8, 0.80, 0.80),
     ]
     runs = []
     ode_rows = []
@@ -1212,6 +1522,7 @@ def main() -> None:
     experiment_d_multi_home_threshold(fig_dir, table_dir)
     experiment_d_multi_home_paths(fig_dir, table_dir)
     experiment_quality_advantage(fig_dir, table_dir)
+    experiment_optimal_strategy_validation(fig_dir, table_dir)
     experiment_mechanism_ablation(fig_dir, table_dir)
     experiment_abm_ode_comparison(fig_dir, table_dir)
     print(f"Saved revised ABM experiment figures to: {fig_dir}")
