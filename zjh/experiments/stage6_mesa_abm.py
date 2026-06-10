@@ -757,7 +757,7 @@ def mesa_experiment_2_merchant_multihoming_cost_scan(output_root: str):
             k_M=k_m,
             multi_home_cost=k_m,
             merchant_multi_home_cost=k_m,
-            multi_home_gap=k_m,
+            
 
             # 不使用强制多归属概率
             # merchant_multi_home_override 不再传入
@@ -1324,8 +1324,36 @@ def mesa_experiment_5_ablation(output_root: str):
                 "sigmaU": 0.0,
                 "sigmaM": 0.0,
                 "preference_sigma": 0.0,
+                "user_taste_noise": 0.0,
+                "merchant_taste_noise": 0.0,
+                "user_type_ratios": {
+                "normal": 1.0,
+            },
+            "merchant_type_ratios": {
+                "small_medium": 1.0,
+           },
+            "user_type_params": {
+                "normal": {
+                    "w_q": 1.0,
+                    "w_m": 1.0,
+                    "w_s": 1.0,
+                    "w_p": 1.0,
+                    "w_c": 1.0,
+                    "inertia": 0.4,
+                },
+            },
+            "merchant_type_params": {
+                "small_medium": {
+                    "v_r": 1.0,
+                    "v_u": 1.0,
+                    "v_s": 1.0,
+                    "v_c": 1.0,
+                    "multi_home_prob": 0.4,
+                },
             },
         },
+    },
+
         {
             "ablation": "no_network_effect",
             "actual_strategy": "long_term",

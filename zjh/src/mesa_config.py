@@ -16,7 +16,7 @@ class MesaABMParams:
 
     # 智能体规模
     n_users: int = 1000
-    n_merchants: int = 300
+    n_merchants: int = 50
     n_platforms: int = 2
 
     # 仿真期数与重复次数

@@ -86,7 +86,7 @@ class TwoSidedPlatformABM(mesa.Model):
 
     def create_users(self):
         p = self.params
-        pref_sigma = 0.05 * (1.0 + getattr(p, "sigma_theta", 0.8))
+        pref_sigma = 0.05 * getattr(p, "sigma_theta", 0.8)
         for _ in range(p.n_users):
             user_type = self.sample_type(p.user_type_ratios)
             type_param = p.user_type_params[user_type]
@@ -113,7 +113,7 @@ class TwoSidedPlatformABM(mesa.Model):
 
     def create_merchants(self):
         p = self.params
-        pref_sigma = 0.05 * (1.0 + getattr(p, "sigma_theta", 0.8))
+        pref_sigma = 0.05 * getattr(p, "sigma_theta", 0.8)
 
         for _ in range(p.n_merchants):
             merchant_type = self.sample_type(p.merchant_type_ratios)
