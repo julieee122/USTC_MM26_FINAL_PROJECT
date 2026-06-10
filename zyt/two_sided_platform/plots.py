@@ -511,4 +511,73 @@ def plot_stage234_figures(summaries, trajectories, output_dir="results/figures")
     plt.close(fig)
     written.append(str(path))
 
+    delay_runs = {
+        run_id: records
+        for run_id, records in trajectories.items()
+        if run_id.startswith("stage4_quality_delay_strong_B")
+    }
+    if delay_runs:
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharex=True)
+        for run_id in sorted(delay_runs, key=lambda value: float(value.rsplit("B", 1)[1])):
+            records = delay_runs[run_id]
+            budget = float(run_id.rsplit("B", 1)[1])
+            times = [row["time"] for row in records]
+            avg_share = [
+                0.5 * (row["u_B_user"] + row["m_B_merchant"])
+                for row in records
+            ]
+            axes[0].plot(times, avg_share, label=f"B={budget:g}")
+            axes[1].plot(times, [row["q_B"] for row in records], label=f"B={budget:g}")
+        axes[0].axhline(0.5, color="gray", linewidth=1)
+        axes[0].axhline(0.2, color="gray", linewidth=1, linestyle=":")
+        axes[0].set_title("strong network: delayed quality reversal")
+        axes[0].set_ylabel("B average share")
+        axes[0].set_ylim(0, 1)
+        axes[1].axhline(3.0, color="gray", linewidth=1, linestyle=":")
+        axes[1].set_title("accumulated quality")
+        axes[1].set_ylabel("q_B")
+        for ax in axes:
+            ax.set_xlabel("time")
+            ax.grid(alpha=0.25)
+            ax.legend(fontsize=8)
+        fig.tight_layout()
+        path = output_dir / "fig_stage4_quality_delayed_reversal.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(str(path))
+
+    quality_scan_rows = [
+        row
+        for row in summaries
+        if row["stage"] == 4 and row["experiment"] == "quality_budget_scan"
+    ]
+    if quality_scan_rows:
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharex=True)
+        for network in ["medium", "strong"]:
+            rows = [row for row in quality_scan_rows if row["network_label"] == network]
+            rows.sort(key=lambda row: row["budget"])
+            budgets = [row["budget"] for row in rows]
+            final_shares = [
+                0.5 * (row["B_user_T"] + row["B_merchant_T"])
+                for row in rows
+            ]
+            profits = [row["discounted_profit_B"] for row in rows]
+            axes[0].plot(budgets, final_shares, marker="o", markersize=3, label=network)
+            axes[1].plot(budgets, profits, marker="o", markersize=3, label=network)
+        axes[0].axhline(0.5, color="gray", linewidth=1)
+        axes[0].set_title("final share saturates")
+        axes[0].set_ylabel("B final average share")
+        axes[0].set_ylim(0, 1.03)
+        axes[1].set_title("profit has diminishing returns")
+        axes[1].set_ylabel("discounted profit of B")
+        for ax in axes:
+            ax.set_xlabel("pure quality investment budget")
+            ax.grid(alpha=0.25)
+            ax.legend(fontsize=8)
+        fig.tight_layout()
+        path = output_dir / "fig_stage4_quality_diminishing_returns.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(str(path))
+
     return written

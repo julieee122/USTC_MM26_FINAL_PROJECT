@@ -51,6 +51,9 @@ QUALITY_INVESTMENT_STRATEGIES = [
     ("quality_only", quality_only_strategy),
 ]
 
+QUALITY_DELAY_BUDGETS = [0.1, 0.2, 0.8]
+QUALITY_BUDGET_SCAN = [round(idx * 0.1, 1) for idx in range(0, 16)]
+
 
 def _sum_records(records, key):
     return sum(row.get(key, 0.0) for row in records[1:])
@@ -386,6 +389,85 @@ def run_stage4_quality_investment_experiments(base_config=None):
     return summaries, trajectories
 
 
+def run_stage4_quality_investment_supplements(base_config=None):
+    """Stage 4 supplements: delayed reversal and diminishing returns of quality."""
+    summaries = []
+    trajectories = {}
+
+    # Strong network effects make the early lock-in pressure visible. Pure
+    # quality investment removes immediate subsidy effects, so the path shows
+    # whether accumulated quality alone can push B across the critical region.
+    strong_network = STAGE234_NETWORK_LEVELS[1]
+    for budget in QUALITY_DELAY_BUDGETS:
+        params = _base_challenger_config(base_config, strong_network, T=300)
+        params["theta"] = 1.0
+        records = run_simulation(
+            params,
+            x0=0.80,
+            y0=0.80,
+            strategy_A=no_strategy,
+            strategy_B=quality_only_strategy,
+            budget_B=budget,
+            use_congestion=True,
+            use_quality_investment=True,
+        )
+        run_id = f"stage4_quality_delay_strong_B{budget:g}"
+        trajectories[run_id] = records
+        summaries.append(
+            {
+                "stage": 4,
+                "experiment": "quality_delay_path",
+                "run_id": run_id,
+                "network_label": "strong",
+                "alpha": strong_network["alpha"],
+                "beta": strong_network["beta"],
+                "strategy": "quality_only",
+                "budget": budget,
+                "theta": 1.0,
+                "rho": params["rho"],
+                "use_congestion": True,
+                "use_quality_investment": True,
+                **summarize_policy_run(records),
+            }
+        )
+
+    for network in STAGE234_NETWORK_LEVELS:
+        for budget in QUALITY_BUDGET_SCAN:
+            params = _base_challenger_config(base_config, network, T=300)
+            params["theta"] = 1.0
+            records = run_simulation(
+                params,
+                x0=0.80,
+                y0=0.80,
+                strategy_A=no_strategy,
+                strategy_B=quality_only_strategy,
+                budget_B=budget,
+                use_congestion=True,
+                use_quality_investment=True,
+            )
+            run_id = f"stage4_quality_budget_scan_{network['label']}_B{budget:g}"
+            if budget in {0.0, 0.2, 0.6, 1.0, 1.4}:
+                trajectories[run_id] = records
+            summaries.append(
+                {
+                    "stage": 4,
+                    "experiment": "quality_budget_scan",
+                    "run_id": run_id,
+                    "network_label": network["label"],
+                    "alpha": network["alpha"],
+                    "beta": network["beta"],
+                    "strategy": "quality_only",
+                    "budget": budget,
+                    "theta": 1.0,
+                    "rho": params["rho"],
+                    "use_congestion": True,
+                    "use_quality_investment": True,
+                    **summarize_policy_run(records),
+                }
+            )
+    return summaries, trajectories
+
+
 def run_stage234_experiments(base_config=None):
     stage2_summary, stage2_trajectories = run_stage2_subsidy_experiments(base_config)
     stage2_low_summary, stage2_low_trajectories = run_stage2_low_budget_supplement(base_config)
@@ -394,14 +476,27 @@ def run_stage234_experiments(base_config=None):
     stage4_summary, stage4_trajectories = run_stage4_quality_investment_experiments(
         base_config
     )
+    (
+        stage4_supplement_summary,
+        stage4_supplement_trajectories,
+    ) = run_stage4_quality_investment_supplements(base_config)
     trajectories = {
         **stage2_trajectories,
         **stage2_low_trajectories,
         **stage2_exit_trajectories,
         **stage3_trajectories,
         **stage4_trajectories,
+        **stage4_supplement_trajectories,
     }
-    return stage2_summary + stage2_low_summary + stage2_exit_summary + stage3_summary + stage4_summary, trajectories
+    return (
+        stage2_summary
+        + stage2_low_summary
+        + stage2_exit_summary
+        + stage3_summary
+        + stage4_summary
+        + stage4_supplement_summary,
+        trajectories,
+    )
 
 
 def save_stage234_outputs(output_dir="results"):
