@@ -5,16 +5,7 @@ from src.mesa_agents import UserAgent, MerchantAgent, PlatformAgent
 
 
 class TwoSidedPlatformABM(mesa.Model):
-    """
-    双边平台竞争 Mesa ABM 模型。
-
-    相比前五阶段宏观 Logit 模型，本模型引入：
-    1. 用户异质性；
-    2. 商户异质性；
-    3. 多归属；
-    4. 随机偏好；
-    5. 平台智能体动态策略。
-    """
+   
 
     def __init__(self, params):
         super().__init__(seed=params.seed)
@@ -27,20 +18,22 @@ class TwoSidedPlatformABM(mesa.Model):
         self.users = []
         self.merchants = []
 
+        active_platform = str(getattr(params, "active_strategy_platform", "B")).upper()
+
         self.platform_A = PlatformAgent(
             model=self,
             platform_name="A",
-            active_strategy=True
+            active_strategy=(active_platform == "A"),
         )
 
         self.platform_B = PlatformAgent(
             model=self,
             platform_name="B",
-            active_strategy=False
+            active_strategy=(active_platform == "B"),
         )
 
-        self.user_share_A = params.x0
-        self.merchant_share_A = params.y0
+        self.user_share_A = float(params.x0)
+        self.merchant_share_A = float(params.y0)
 
         self.user_multi_home_rate = 0.0
         self.merchant_multi_home_rate = 0.0
@@ -87,13 +80,14 @@ class TwoSidedPlatformABM(mesa.Model):
     def create_users(self):
         p = self.params
         pref_sigma = 0.05 * getattr(p, "sigma_theta", 0.8)
+
         for _ in range(p.n_users):
             user_type = self.sample_type(p.user_type_ratios)
             type_param = p.user_type_params[user_type]
 
             can_multi_home = self.rng.random() < p.user_multi_home_prob
             platforms = self.initial_platforms(p.x0, can_multi_home)
-            
+
             agent = UserAgent(
                 model=self,
                 user_type=user_type,
@@ -136,8 +130,6 @@ class TwoSidedPlatformABM(mesa.Model):
                 v_s=type_param["v_s"],
                 v_c=type_param["v_c"],
                 can_multi_home=can_multi_home,
-                
-
                 base_pref_A=float(self.rng.normal(0.0, pref_sigma)),
                 base_pref_B=float(self.rng.normal(0.0, pref_sigma)),
             )
@@ -213,21 +205,22 @@ class TwoSidedPlatformABM(mesa.Model):
         self.merchant_multi_home_rate = self.multi_home_rate(self.merchants)
 
         if getattr(self.params, "shortage_enabled", True):
-           N_U = getattr(self.params, "N_U", 1000)
-           N_M = getattr(self.params, "N_M", 50)
-           rho = getattr(self.params, "shortage_rho", 10.0)
-           eps = getattr(self.params, "shortage_buffer", 1e-6)
+            N_U = getattr(self.params, "N_U", getattr(self.params, "n_users", 1000))
+            N_M = getattr(self.params, "N_M", getattr(self.params, "n_merchants", 50))
+            rho = getattr(self.params, "shortage_rho", getattr(self.params, "rho", 10.0))
+            eps = getattr(self.params, "shortage_buffer", 1e-6)
 
-           self.shortage_A = max(
-               0.0,
-               N_U * self.user_share_A / (N_M * self.merchant_share_A + eps) - rho
+            user_share_B = 1.0 - self.user_share_A
+            merchant_share_B = 1.0 - self.merchant_share_A
+
+            self.shortage_A = max(
+                0.0,
+                N_U * self.user_share_A / (N_M * self.merchant_share_A + eps) - rho,
             )
 
-           self.shortage_B = max(
-               0.0,
-               N_U * (1.0 - self.user_share_A)
-               / (N_M * (1.0 - self.merchant_share_A) + eps)
-               - rho
+            self.shortage_B = max(
+                0.0,
+                N_U * user_share_B / (N_M * merchant_share_B + eps) - rho,
             )
         else:
             self.shortage_A = 0.0
@@ -264,7 +257,7 @@ class TwoSidedPlatformABM(mesa.Model):
         alpha = getattr(p, "alpha", 0.8)
 
         if getattr(p, "shortage_enabled", True) and getattr(p, "supply_penalty_enabled", True):
-            shortage_penalty = getattr(p, "shortage_theta", 1.0) * shortage
+            shortage_penalty = getattr(p, "shortage_theta", getattr(p, "theta", 1.0)) * shortage
         else:
             shortage_penalty = 0.0
 
@@ -277,7 +270,7 @@ class TwoSidedPlatformABM(mesa.Model):
             - user.w_c * shortage_penalty
             + inertia_bonus
             + noise
-       )
+        )
 
         return utility
 
@@ -348,18 +341,29 @@ class TwoSidedPlatformABM(mesa.Model):
             self.step()
 
     def record_history(self):
+        user_share_B = 1.0 - self.user_share_A
+        merchant_share_B = 1.0 - self.merchant_share_A
+
         row = {
             "t": self.current_step,
             "strategy": self.params.strategy,
+            "active_strategy_platform": getattr(self.params, "active_strategy_platform", "B"),
 
             "user_share_A": self.user_share_A,
             "merchant_share_A": self.merchant_share_A,
+            "user_share_B": user_share_B,
+            "merchant_share_B": merchant_share_B,
+
+            "L_A": 0.5 * (self.user_share_A + self.merchant_share_A),
+            "L_B": 0.5 * (user_share_B + merchant_share_B),
 
             "user_multi_home_rate": self.user_multi_home_rate,
             "merchant_multi_home_rate": self.merchant_multi_home_rate,
 
             "shortage_A": self.shortage_A,
             "shortage_B": self.shortage_B,
+            "C_A": self.shortage_A,
+            "C_B": self.shortage_B,
 
             "avg_user_utility": self.avg_user_utility,
             "avg_merchant_utility": self.avg_merchant_utility,
@@ -368,14 +372,25 @@ class TwoSidedPlatformABM(mesa.Model):
 
             "user_subsidy_A": self.platform_A.user_subsidy,
             "merchant_subsidy_A": self.platform_A.merchant_subsidy,
+            "user_subsidy_B": self.platform_B.user_subsidy,
+            "merchant_subsidy_B": self.platform_B.merchant_subsidy,
 
             "user_quality_A": self.platform_A.user_quality,
             "merchant_quality_A": self.platform_A.merchant_quality,
+            "user_quality_B": self.platform_B.user_quality,
+            "merchant_quality_B": self.platform_B.merchant_quality,
 
             "cum_revenue_A": self.platform_A.cum_revenue,
             "cum_subsidy_cost_A": self.platform_A.cum_subsidy_cost,
             "cum_invest_cost_A": self.platform_A.cum_invest_cost,
+            "cum_total_cost_A": self.platform_A.cum_subsidy_cost + self.platform_A.cum_invest_cost,
             "cum_profit_A": self.platform_A.cum_profit,
+
+            "cum_revenue_B": self.platform_B.cum_revenue,
+            "cum_subsidy_cost_B": self.platform_B.cum_subsidy_cost,
+            "cum_invest_cost_B": self.platform_B.cum_invest_cost,
+            "cum_total_cost_B": self.platform_B.cum_subsidy_cost + self.platform_B.cum_invest_cost,
+            "cum_profit_B": self.platform_B.cum_profit,
         }
 
         # 用户类型分组指标
@@ -384,12 +399,18 @@ class TwoSidedPlatformABM(mesa.Model):
                 self.users,
                 "user_type",
                 user_type,
-                "A"
+                "A",
+            )
+            row[f"user_share_B_{user_type}"] = self.type_weighted_share(
+                self.users,
+                "user_type",
+                user_type,
+                "B",
             )
             row[f"user_utility_{user_type}"] = self.type_average_utility(
                 self.users,
                 "user_type",
-                user_type
+                user_type,
             )
 
         # 商户类型分组指标
@@ -398,12 +419,18 @@ class TwoSidedPlatformABM(mesa.Model):
                 self.merchants,
                 "merchant_type",
                 merchant_type,
-                "A"
+                "A",
+            )
+            row[f"merchant_share_B_{merchant_type}"] = self.type_weighted_share(
+                self.merchants,
+                "merchant_type",
+                merchant_type,
+                "B",
             )
             row[f"merchant_utility_{merchant_type}"] = self.type_average_utility(
                 self.merchants,
                 "merchant_type",
-                merchant_type
+                merchant_type,
             )
 
         self.history.append(row)

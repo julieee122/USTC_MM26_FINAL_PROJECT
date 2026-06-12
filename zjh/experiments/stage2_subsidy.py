@@ -2,7 +2,6 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-
 from experiments.report_common import (
     ensure_dir,
     setup_matplotlib,
@@ -14,44 +13,60 @@ from experiments.report_common import (
     get_profit,
     combined_share,
     platform_state,
-    static_policy,
-    step_subsidy_policy,
+    static_policy_B,
+    step_subsidy_policy_B,
 )
 
 
 DT_REPORT = 0.05
-X0_B = 0.2
-Y0_B = 0.2
-DISCOUNT = 0.98
+
+# 统一报告口径：x,y 始终表示平台 A 份额；平台 A 初始占优，平台 B 为挑战者。
+X0_A = 0.8
+Y0_A = 0.8
+
+
+REPORT_MODEL_KWARGS = {
+    "lambda_u": 2.6,
+    "lambda_m": 2.6,
+    "discount": 0.98,
+    "use_report_profit": True,
+    "profit_mu": 5.0,
+    "shortage_mode": "absolute_B",
+    "quality_base_effect_scale": 1.0,
+    "quality_stock_effect_scale": 1.0,
+}
+def _final_B_from_result(res):
+    """由模型输出的 A 份额反推出平台 B 最终份额。"""
+    xA = get_x(res)
+    yA = get_y(res)
+    xB = 1.0 - xA
+    yB = 1.0 - yA
+    return xA, yA, xB, yB, combined_share(xB, yB)
+
 
 def run_stage2(output_root: str):
     setup_matplotlib()
     out = os.path.join(output_root, "stage2_subsidy")
     ensure_dir(out)
 
-    # 5.4 主实验1
     stage2_report_subsidy_direction_and_budget(output_root)
-
-    # 5.4 补充实验
+    stage2_report_subsidy_timeseries_budget_cases(output_root)
     stage2_report_low_budget_single_side_advantage(output_root)
-
-    # 5.4 主实验2
     stage2_report_subsidy_exit(output_root)
 
+
 # ============================================================
-# 报告版补充实验：从原 stage7 拆回 stage2
+# 5.4 主实验 1：补贴方向与预算强度
 # ============================================================
 
 def stage2_report_subsidy_direction_and_budget(output_root: str) -> None:
     """
-    对应报告 5.4 主实验 1：
-    补贴方向与预算强度。
+    对应报告 5.4 主实验 1：补贴方向与预算强度。
 
-    报告参数：
-    - 平台 A 初始占优，平台 B 为挑战者，所以代码中 B 初始份额 0.2
-    - 中等网络效应 alpha=beta=0.8
-    - 强网络效应 alpha=beta=1.5
-    - B in {0,0.1,0.2,0.4,1.2}
+    统一 A/B 口径：
+    - x,y 表示平台 A 份额；
+    - 平台 A 初始占优 x0=y0=0.8；
+    - 平台 B 采取补贴策略，补贴通过 static_policy_B 进入模型。
     """
     out = os.path.join(output_root, "stage2_subsidy", "report_subsidy_direction_budget")
     ensure_dir(out)
@@ -82,22 +97,21 @@ def stage2_report_subsidy_direction_and_budget(output_root: str) -> None:
                 params = make_params(
                     alpha=alpha,
                     beta=beta,
-                    discount=DISCOUNT,
+                    
+                    **REPORT_MODEL_KWARGS,
                 )
 
                 res = call_simulate(
-                    X0_B,
-                    Y0_B,
+                    X0_A,
+                    Y0_A,
                     params,
                     T=200.0,
                     dt=DT_REPORT,
-                    policy=static_policy(sub_u, sub_m, 0.0),
+                    policy=static_policy_B(sub_u, sub_m, 0.0),
                 )
 
-                xf = get_x(res)
-                yf = get_y(res)
+                xA, yA, xB, yB, LB = _final_B_from_result(res)
                 profit = get_profit(res)
-                LB = combined_share(xf, yf)
 
                 rows.append({
                     "network_level": level_name,
@@ -107,18 +121,19 @@ def stage2_report_subsidy_direction_and_budget(output_root: str) -> None:
                     "strategy": strategy_name,
                     "subsidy_user": sub_u,
                     "subsidy_merchant": sub_m,
-                    "final_B_user_share": xf,
-                    "final_B_merchant_share": yf,
+                    "final_A_user_share": xA,
+                    "final_A_merchant_share": yA,
+                    "final_B_user_share": xB,
+                    "final_B_merchant_share": yB,
                     "final_B_average_share": LB,
                     "profit": profit,
-                    "state": platform_state(xf, yf),
+                    "state": platform_state(xB, yB),
                 })
 
     save_rows_csv(rows, os.path.join(out, "subsidy_direction_budget.csv"))
 
     # 图：中等网络效应下的最终平均份额
     plt.figure(figsize=(8, 5))
-
     for strategy_name in strategies:
         xs = []
         ys = []
@@ -132,7 +147,6 @@ def stage2_report_subsidy_direction_and_budget(output_root: str) -> None:
             if match:
                 xs.append(B)
                 ys.append(match[0]["final_B_average_share"])
-
         plt.plot(xs, ys, marker="o", label=strategy_name)
 
     plt.xlabel("预算强度 B")
@@ -147,7 +161,6 @@ def stage2_report_subsidy_direction_and_budget(output_root: str) -> None:
 
     # 图：中等网络效应下的贴现利润
     plt.figure(figsize=(8, 5))
-
     for strategy_name in strategies:
         xs = []
         ys = []
@@ -161,7 +174,6 @@ def stage2_report_subsidy_direction_and_budget(output_root: str) -> None:
             if match:
                 xs.append(B)
                 ys.append(match[0]["profit"])
-
         plt.plot(xs, ys, marker="o", label=strategy_name)
 
     plt.xlabel("预算强度 B")
@@ -173,14 +185,141 @@ def stage2_report_subsidy_direction_and_budget(output_root: str) -> None:
     plt.savefig(os.path.join(out, "subsidy_direction_budget_profit.png"), dpi=300)
     plt.close()
 
+# ============================================================
+# 5.4 主实验 1 补充图：不同预算下的动态轨迹
+# ============================================================
+
+def stage2_report_subsidy_timeseries_budget_cases(output_root: str) -> None:
+    
+    out = os.path.join(
+        output_root,
+        "stage2_subsidy",
+        "report_subsidy_direction_budget",
+    )
+    ensure_dir(out)
+
+    budget_cases = [0.1, 1.2]
+
+    strategies = {
+        "只补贴用户": (1.0, 0.0),
+        "只补贴商户": (0.0, 1.0),
+        "均衡补贴": (0.5, 0.5),
+        "偏用户补贴": (0.75, 0.25),
+        "偏商户补贴": (0.25, 0.75),
+    }
+
+    rows = []
+    results = {}
+
+    for B in budget_cases:
+        for strategy_name, (rho_u, rho_m) in strategies.items():
+            sub_u = rho_u * B
+            sub_m = rho_m * B
+
+            params = make_params(
+                alpha=0.8,
+                beta=0.8,
+                
+                **REPORT_MODEL_KWARGS,
+            )
+
+            res = call_simulate(
+                X0_A,
+                Y0_A,
+                params,
+                T=200.0,
+                dt=DT_REPORT,
+                policy=static_policy_B(sub_u, sub_m, 0.0),
+            )
+
+            results[(B, strategy_name)] = res
+
+            t_values = np.asarray(res["t"], dtype=float)
+            x_A = np.asarray(res["x"], dtype=float)
+            y_A = np.asarray(res["y"], dtype=float)
+
+            x_B = 1.0 - x_A
+            y_B = 1.0 - y_A
+            L_B = 0.5 * (x_B + y_B)
+
+            for t, uB, mB, lb in zip(t_values, x_B, y_B, L_B):
+                rows.append({
+                    "budget_B": float(B),
+                    "strategy": strategy_name,
+                    "t": float(t),
+                    "B_user_share": float(uB),
+                    "B_merchant_share": float(mB),
+                    "B_average_share": float(lb),
+                })
+
+    save_rows_csv(
+        rows,
+        os.path.join(out, "subsidy_direction_budget_timeseries.csv"),
+    )
+
+    fig, axes = plt.subplots(
+        len(budget_cases),
+        2,
+        figsize=(14, 7),
+        sharex=True,
+        sharey=True,
+    )
+
+    for row_idx, B in enumerate(budget_cases):
+        ax_user = axes[row_idx, 0]
+        ax_merchant = axes[row_idx, 1]
+
+        for strategy_name in strategies:
+            res = results[(B, strategy_name)]
+            t_values = np.asarray(res["t"], dtype=float)
+            x_B = 1.0 - np.asarray(res["x"], dtype=float)
+            y_B = 1.0 - np.asarray(res["y"], dtype=float)
+
+            ax_user.plot(t_values, x_B, label=strategy_name)
+            ax_merchant.plot(t_values, y_B, label=strategy_name)
+
+        ax_user.axhline(0.5, linestyle="--", linewidth=1.0)
+        ax_merchant.axhline(0.5, linestyle="--", linewidth=1.0)
+
+        ax_user.set_title(rf"预算 $B={B}$：平台 B 用户份额")
+        ax_merchant.set_title(rf"预算 $B={B}$：平台 B 商户份额")
+
+        ax_user.set_ylabel("市场份额")
+        ax_user.grid(alpha=0.3)
+        ax_merchant.grid(alpha=0.3)
+
+    axes[-1, 0].set_xlabel("时间")
+    axes[-1, 1].set_xlabel("时间")
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        ncol=5,
+        frameon=False,
+        bbox_to_anchor=(0.5, -0.02),
+    )
+
+    fig.suptitle(
+        "阶段2图7：不同补贴方向和预算强度下平台 B 用户/商户份额演化",
+        fontsize=14,
+    )
+    fig.tight_layout(rect=[0, 0.06, 1, 0.95])
+
+    fig.savefig(
+        os.path.join(out, "subsidy_direction_budget_timeseries.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+# ============================================================
+# 5.4 补充实验：低预算下的单侧补贴优势
+# ============================================================
 
 def stage2_report_low_budget_single_side_advantage(output_root: str) -> None:
     """
-    对应报告 5.4 补充实验：
-    低预算区间内单侧补贴与均衡补贴的对比。
-
-    扫描：
-    - B in [0,0.2], step=0.01
+    对应报告 5.4 补充实验：低预算区间内单侧补贴与均衡补贴对比。
     """
     out = os.path.join(output_root, "stage2_subsidy", "report_low_budget_single_side")
     ensure_dir(out)
@@ -203,21 +342,20 @@ def stage2_report_low_budget_single_side_advantage(output_root: str) -> None:
             params = make_params(
                 alpha=0.8,
                 beta=0.8,
-                discount=DISCOUNT,
+                
+                **REPORT_MODEL_KWARGS,
             )
 
             res = call_simulate(
-                X0_B,
-                Y0_B,
+                X0_A,
+                Y0_A,
                 params,
                 T=200.0,
                 dt=DT_REPORT,
-                policy=static_policy(sub_u, sub_m, 0.0),
+                policy=static_policy_B(sub_u, sub_m, 0.0),
             )
 
-            xf = get_x(res)
-            yf = get_y(res)
-            LB = combined_share(xf, yf)
+            xA, yA, xB, yB, LB = _final_B_from_result(res)
             profit = get_profit(res)
 
             rows.append({
@@ -225,8 +363,10 @@ def stage2_report_low_budget_single_side_advantage(output_root: str) -> None:
                 "strategy": strategy_name,
                 "subsidy_user": sub_u,
                 "subsidy_merchant": sub_m,
-                "final_B_user_share": xf,
-                "final_B_merchant_share": yf,
+                "final_A_user_share": xA,
+                "final_A_merchant_share": yA,
+                "final_B_user_share": xB,
+                "final_B_merchant_share": yB,
                 "final_B_average_share": LB,
                 "profit": profit,
             })
@@ -301,16 +441,13 @@ def stage2_report_low_budget_single_side_advantage(output_root: str) -> None:
     plt.close()
 
 
+# ============================================================
+# 5.4 主实验 2：阶段性补贴退出
+# ============================================================
+
 def stage2_report_subsidy_exit(output_root: str) -> None:
     """
-    对应报告 5.4 主实验 2：
-    阶段性补贴退出。
-
-    报告参数：
-    - 中等网络效应 alpha=beta=0.8
-    - B in [0,1.2]
-    - Ts in [0,10]
-    - T=200
+    对应报告 5.4 主实验 2：阶段性补贴退出。
     """
     out = os.path.join(output_root, "stage2_subsidy", "report_subsidy_exit")
     ensure_dir(out)
@@ -328,21 +465,20 @@ def stage2_report_subsidy_exit(output_root: str) -> None:
             params = make_params(
                 alpha=0.8,
                 beta=0.8,
-                discount=DISCOUNT,
+                
+                **REPORT_MODEL_KWARGS,
             )
 
             res = call_simulate(
-                X0_B,
-                Y0_B,
+                X0_A,
+                Y0_A,
                 params,
                 T=200.0,
                 dt=DT_REPORT,
-                policy=step_subsidy_policy(B, Ts, split=0.5),
+                policy=step_subsidy_policy_B(B, Ts, split=0.5),
             )
 
-            xf = get_x(res)
-            yf = get_y(res)
-            LB = combined_share(xf, yf)
+            xA, yA, xB, yB, LB = _final_B_from_result(res)
             profit = get_profit(res)
 
             share_grid[i, j] = LB
@@ -351,11 +487,13 @@ def stage2_report_subsidy_exit(output_root: str) -> None:
             rows.append({
                 "budget_B": float(B),
                 "subsidy_duration_Ts": float(Ts),
-                "final_B_user_share": xf,
-                "final_B_merchant_share": yf,
+                "final_A_user_share": xA,
+                "final_A_merchant_share": yA,
+                "final_B_user_share": xB,
+                "final_B_merchant_share": yB,
                 "final_B_average_share": LB,
                 "profit": profit,
-                "state": platform_state(xf, yf),
+                "state": platform_state(xB, yB),
             })
 
     save_rows_csv(rows, os.path.join(out, "subsidy_exit_grid.csv"))

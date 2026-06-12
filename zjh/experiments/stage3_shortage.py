@@ -11,18 +11,18 @@ from experiments.report_common import (
     get_x,
     get_y,
     get_profit,
-    get_shortage,
+    get_shortage_B,
     combined_share,
-    static_policy,
+    static_policy_B,
 )
 
 
 DT = 0.05
 T = 200.0
 
-# 报告 5.5：平台 A 初始占优 0.8，因此平台 B 挑战者初始份额为 0.2
-X0_B = 0.2
-Y0_B = 0.2
+# 统一报告口径：x,y 表示平台 A 份额；平台 A 初始占优，平台 B 为挑战者。
+X0_A = 0.8
+Y0_A = 0.8
 
 ALPHA = 0.8
 BETA = 0.8
@@ -35,6 +35,24 @@ RHO = 10.0
 THETA = 1.0
 EPS = 1e-6
 
+REPORT_MODEL_KWARGS = {
+    "lambda_u": 2.6,
+    "lambda_m": 2.6,
+    "discount": 0.98,
+    "use_report_profit": True,
+    "profit_mu": 5.0,
+    "shortage_mode": "absolute_B",
+    "quality_base_effect_scale": 1.0,
+    "quality_stock_effect_scale": 1.0,
+}
+
+def _final_B_from_result(res):
+    xA = get_x(res)
+    yA = get_y(res)
+    xB = 1.0 - xA
+    yB = 1.0 - yA
+    return xA, yA, xB, yB, combined_share(xB, yB)
+
 
 def run_stage3(output_root: str):
     """
@@ -42,10 +60,10 @@ def run_stage3(output_root: str):
 
     对应报告 5.5：
     - 中等网络效应 alpha=beta=0.8；
-    - 平台 B 初始为挑战者，x0=y0=0.2；
+    - 平台 A 初始占优 x0=y0=0.8；
+    - 平台 B 为挑战者并采取补贴策略；
     - N_U=1000, N_M=50, rho=10.0, theta=1.0；
-    - 预算固定为 B=0.8；
-    - 比较只补贴用户、只补贴商户、均衡补贴、偏商户补贴。
+    - 预算固定为 B=0.8。
     """
     setup_matplotlib()
 
@@ -63,13 +81,14 @@ def run_stage3(output_root: str):
         epsilon=EPS,
         shortage_rho=RHO,
         shortage_buffer=EPS,
+        **REPORT_MODEL_KWARGS,
     )
 
     strategies = {
-        "只补贴用户": static_policy(BUDGET, 0.0, 0.0),
-        "只补贴商户": static_policy(0.0, BUDGET, 0.0),
-        "均衡补贴": static_policy(0.5 * BUDGET, 0.5 * BUDGET, 0.0),
-        "偏商户补贴": static_policy(0.25 * BUDGET, 0.75 * BUDGET, 0.0),
+        "只补贴用户": static_policy_B(BUDGET, 0.0, 0.0),
+        "只补贴商户": static_policy_B(0.0, BUDGET, 0.0),
+        "均衡补贴": static_policy_B(0.5 * BUDGET, 0.5 * BUDGET, 0.0),
+        "偏商户补贴": static_policy_B(0.25 * BUDGET, 0.75 * BUDGET, 0.0),
     }
 
     results = {}
@@ -77,8 +96,8 @@ def run_stage3(output_root: str):
 
     for name, policy in strategies.items():
         res = call_simulate(
-            X0_B,
-            Y0_B,
+            X0_A,
+            Y0_A,
             params,
             T=T,
             dt=DT,
@@ -87,16 +106,17 @@ def run_stage3(output_root: str):
 
         results[name] = res
 
-        final_u = get_x(res)
-        final_m = get_y(res)
-        max_shortage, avg_shortage = get_shortage(res)
+        final_A_u, final_A_m, final_B_u, final_B_m, LB = _final_B_from_result(res)
+        max_shortage, avg_shortage = get_shortage_B(res)
         profit = get_profit(res)
 
         rows.append({
             "strategy": name,
-            "final_B_user_share": final_u,
-            "final_B_merchant_share": final_m,
-            "final_B_average_share": combined_share(final_u, final_m),
+            "final_A_user_share": final_A_u,
+            "final_A_merchant_share": final_A_m,
+            "final_B_user_share": final_B_u,
+            "final_B_merchant_share": final_B_m,
+            "final_B_average_share": LB,
             "max_shortage_B": max_shortage,
             "avg_shortage_B": avg_shortage,
             "profit": profit,
@@ -107,10 +127,12 @@ def run_stage3(output_root: str):
     # 图 1：平台 B 平均份额动态
     plt.figure(figsize=(9, 5))
     for name, res in results.items():
-        x = np.asarray(res["x"], dtype=float)
-        y = np.asarray(res["y"], dtype=float)
+        xA = np.asarray(res["x"], dtype=float)
+        yA = np.asarray(res["y"], dtype=float)
         t = np.asarray(res["t"], dtype=float)
-        avg = 0.5 * (x + y)
+        xB = 1.0 - xA
+        yB = 1.0 - yA
+        avg = 0.5 * (xB + yB)
         plt.plot(t, avg, label=f"{name}, L_B={avg[-1]:.3f}")
 
     plt.axhline(0.5, linestyle="--", linewidth=1.0, label="反超阈值 0.5")
@@ -124,16 +146,10 @@ def run_stage3(output_root: str):
     plt.savefig(os.path.join(out, "stage3_shortage_average_share.png"), dpi=300)
     plt.close()
 
-    # 图 2：供给不足惩罚动态
+    # 图 2：平台 B 供给不足惩罚动态
     plt.figure(figsize=(9, 5))
     for name, res in results.items():
-        if "shortage_B" in res:
-            shortage = np.asarray(res["shortage_B"], dtype=float)
-        elif "shortage_A" in res:
-            shortage = np.asarray(res["shortage_A"], dtype=float)
-        else:
-            shortage = np.zeros_like(np.asarray(res["t"], dtype=float))
-
+        shortage = np.asarray(res.get("shortage_B", np.zeros_like(res["t"])), dtype=float)
         t = np.asarray(res["t"], dtype=float)
         plt.plot(t, shortage, label=f"{name}, max={np.max(shortage):.2f}")
 

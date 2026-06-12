@@ -24,6 +24,17 @@ from experiments.report_common import (
 
 DT_REPORT = 0.05
 
+STAGE1_SOLVER = "rk45"
+
+
+def call_stage1_simulate(*args, **kwargs):
+    """
+    阶段 1 基础机制实验使用 RK45。
+    后续阶段策略实验仍然默认使用欧拉法。
+    """
+    kwargs.setdefault("method", STAGE1_SOLVER)
+    return call_simulate(*args, **kwargs)
+
 def run_stage1(output_root: str):
     setup_matplotlib()
     out = os.path.join(output_root, "stage1_basic")
@@ -87,7 +98,7 @@ def stage1_report_main_network_initial_size(output_root: str) -> None:
 
             params = make_params(alpha=alpha, beta=beta)
 
-            res = call_simulate(
+            res = call_stage1_simulate(
                 x0,
                 y0,
                 params,
@@ -155,7 +166,7 @@ def stage1_report_main_network_initial_size(output_root: str) -> None:
 
         # 典型轨迹：x0=y0=0.55
         params = make_params(alpha=alpha, beta=beta)
-        res = call_simulate(
+        res = call_stage1_simulate(
             0.55,
             0.55,
             params,
@@ -263,7 +274,7 @@ def stage1_report_async_initial_advantage(output_root: str) -> None:
     rows = []
 
     for case_name, x0, y0 in representative_cases:
-        res = call_simulate(
+        res = call_stage1_simulate(
             x0,
             y0,
             params,
@@ -306,7 +317,7 @@ def stage1_report_async_initial_advantage(output_root: str) -> None:
 
     for i, y0 in enumerate(grid):
         for j, x0 in enumerate(grid):
-            res = call_simulate(
+            res = call_stage1_simulate(
                 float(x0),
                 float(y0),
                 params,
@@ -394,7 +405,7 @@ def stage1_report_network_effect_critical_region(output_root: str) -> None:
     for i, beta in enumerate(betas):
         for j, alpha in enumerate(alphas):
             params = make_params(alpha=float(alpha), beta=float(beta))
-            res = call_simulate(x0, y0, params, T=80.0, dt=DT_REPORT)
+            res = call_stage1_simulate(x0, y0, params, T=80.0, dt=DT_REPORT)
 
             xf = get_x(res)
             yf = get_y(res)
@@ -472,7 +483,7 @@ def stage1_report_network_effect_critical_region(output_root: str) -> None:
 
     for k in k_values:
         params = make_params(alpha=float(k), beta=float(k))
-        res = call_simulate(x0, y0, params, T=80.0, dt=DT_REPORT)
+        res = call_stage1_simulate(x0, y0, params, T=80.0, dt=DT_REPORT)
 
         xf = get_x(res)
         yf = get_y(res)
@@ -537,8 +548,8 @@ def stage1_report_quality_advantage_break_lockin(output_root: str) -> None:
     out = os.path.join(output_root, "stage1_basic", "report_quality_break_lockin")
     ensure_dir(out)
 
-    x0_B = 0.2
-    y0_B = 0.2
+    x0_A = 0.8
+    y0_A = 0.8
 
     network_levels = [
         ("弱网络效应", 0.3, 0.3),
@@ -564,23 +575,27 @@ def stage1_report_quality_advantage_break_lockin(output_root: str) -> None:
             params = make_params(
                 alpha=alpha,
                 beta=beta,
-                dq_u_base=float(dq),
-                dq_m_base=float(dq),
+                dq_u_base=-float(dq),
+                dq_m_base=-float(dq),
             )
 
-            res = call_simulate(x0_B, y0_B, params, T=80.0, dt=DT_REPORT)
+            res = call_stage1_simulate(x0_A, y0_A, params, T=80.0, dt=DT_REPORT)
 
-            xf = get_x(res)
-            yf = get_y(res)
-            avg = combined_share(xf, yf)
+            xf_A = get_x(res)
+            yf_A = get_y(res)
+
+            xf_B = 1.0 - xf_A
+            yf_B = 1.0 - yf_A
+
+            avg = combined_share(xf_B, yf_B)
             avg_values.append(avg)
             max_share = max(max_share, avg)
 
-            if break_threshold is None and xf >= 0.5 and yf >= 0.5:
+            if break_threshold is None and xf_B >= 0.5 and yf_B >= 0.5:
                 break_threshold = float(dq)
                 break_share = avg
 
-            if full_threshold is None and xf >= 0.99 and yf >= 0.99:
+            if full_threshold is None and xf_B >= 0.99 and yf_B >= 0.99:
                 full_threshold = float(dq)
 
             rows.append({
@@ -588,10 +603,12 @@ def stage1_report_quality_advantage_break_lockin(output_root: str) -> None:
                 "alpha": alpha,
                 "beta": beta,
                 "delta_q": float(dq),
-                "final_B_user_share": xf,
-                "final_B_merchant_share": yf,
+                "final_A_user_share": xf_A,
+                "final_A_merchant_share": yf_A,
+                "final_B_user_share": xf_B,
+                "final_B_merchant_share": yf_B,
                 "final_B_average_share": avg,
-                "state": platform_state(xf, yf),
+                "state": platform_state(xf_B, yf_B),
             })
 
         threshold_rows.append({
@@ -635,8 +652,8 @@ def stage1_report_quality_threshold_with_switching_cost(output_root: str) -> Non
     out = os.path.join(output_root, "stage1_basic", "report_quality_switching_threshold")
     ensure_dir(out)
 
-    x0_B = 0.2
-    y0_B = 0.2
+    x0_A = 0.8
+    y0_A = 0.8
 
     network_levels = [
         ("弱网络效应", 0.3),
@@ -661,19 +678,22 @@ def stage1_report_quality_threshold_with_switching_cost(output_root: str) -> Non
                     beta=k,
                     eta_u=s,
                     eta_m=s,
-                    dq_u_base=float(dq),
-                    dq_m_base=float(dq),
+                    dq_u_base=-float(dq),
+                    dq_m_base=-float(dq),
                 )
 
-                res = call_simulate(x0_B, y0_B, params, T=80.0, dt=DT_REPORT)
+                res = call_stage1_simulate(x0_A, y0_A, params, T=80.0, dt=DT_REPORT)
 
-                xf = get_x(res)
-                yf = get_y(res)
+                xf_A = get_x(res)
+                yf_A = get_y(res)
 
-                if xf >= 0.5 and yf >= 0.5:
+                xf_B = 1.0 - xf_A
+                yf_B = 1.0 - yf_A
+
+                if xf_B >= 0.5 and yf_B >= 0.5:
                     q_star = float(dq)
-                    u_star = xf
-                    m_star = yf
+                    u_star = xf_B
+                    m_star = yf_B
                     break
 
             threshold_grid[i, j] = q_star

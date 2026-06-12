@@ -1,15 +1,10 @@
 import mesa
 import numpy as np
 
+
 class UserAgent(mesa.Agent):
     """
     用户智能体。
-
-    用户类型包括：
-    1. price_sensitive：价格敏感型；
-    2. quality_sensitive：质量敏感型；
-    3. inertial：惯性用户；
-    4. normal：普通用户。
     """
 
     def __init__(
@@ -73,15 +68,10 @@ class UserAgent(mesa.Agent):
             return {"A"}
         return {"B"}
 
+
 class MerchantAgent(mesa.Agent):
     """
     商户智能体。
-
-    商户类型包括：
-    1. large：大商户；
-    2. small_medium：中小商户；
-    3. new：新商户；
-    4. multi_home：多归属商户。
     """
 
     def __init__(
@@ -146,16 +136,15 @@ class MerchantAgent(mesa.Agent):
             return {"A"}
         return {"B"}
 
+
 class PlatformAgent(mesa.Agent):
     """
     平台智能体。
 
-    平台智能体负责：
-    1. 设置用户补贴；
-    2. 设置商户补贴；
-    3. 决定服务质量投资；
-    4. 根据市场状态调整策略；
-    5. 记录平台利润。
+    重要约定：
+    - self.platform_name == "A" 时，该智能体就是报告中的平台 A；
+    - self.platform_name == "B" 时，该智能体就是报告中的平台 B。
+    - 策略函数中的 x,y,shortage 都读取“自身平台”的状态。
     """
 
     def __init__(self, model, platform_name, active_strategy=False):
@@ -184,10 +173,27 @@ class PlatformAgent(mesa.Agent):
         self.user_invest = 0.0
         self.merchant_invest = 0.0
 
+    def own_market_state(self):
+        """
+        返回当前平台自己的用户份额、商户份额和供给不足。
+        """
+        if self.platform_name == "A":
+            return (
+                self.model.user_share_A,
+                self.model.merchant_share_A,
+                self.model.shortage_A,
+            )
+
+        return (
+            1.0 - self.model.user_share_A,
+            1.0 - self.model.merchant_share_A,
+            self.model.shortage_B,
+        )
+
     def decide_strategy(self):
         """
-        当前实现中，平台 A 可以主动采取策略，
-        平台 B 默认作为基准平台，不主动反制。
+        只有 active_strategy=True 的平台执行策略。
+        报告策略实验中通常设置 active_strategy_platform="B"。
         """
         self.reset_actions()
 
@@ -210,14 +216,19 @@ class PlatformAgent(mesa.Agent):
             self.user_subsidy = p.bilateral_user_subsidy0 * self.model.exp_decay(t)
             self.merchant_subsidy = p.bilateral_merchant_subsidy0 * self.model.exp_decay(t)
 
-        elif p.strategy == "greedy":
+        elif p.strategy in ["greedy", "replace_by_greedy"]:
             if t <= p.greedy_duration:
                 self.user_subsidy = p.greedy_user_subsidy
                 self.merchant_subsidy = p.greedy_merchant_subsidy
                 self.user_invest = p.greedy_user_invest
                 self.merchant_invest = p.greedy_merchant_invest
 
-        elif p.strategy in ["long_term", "targeted_long_term", "full_targeted_long_term"]:
+        elif p.strategy in [
+            "long_term",
+            "targeted_long_term",
+            "full_targeted_long_term",
+            "no_targeting",
+        ]:
             self.targeted_long_term_strategy()
 
         elif p.strategy in ["dynamic", "targeted_dynamic", "replace_by_dynamic"]:
@@ -230,28 +241,25 @@ class PlatformAgent(mesa.Agent):
             self.targeted_long_term_strategy()
             self.user_invest = 0.0
             self.merchant_invest = 0.0
-    
+
     def targeted_long_term_strategy(self):
-   
         p = self.model.params
 
         B = getattr(p, "budget", getattr(p, "total_budget", 0.8))
 
-        x = self.model.user_share_A
-        y = self.model.merchant_share_A
-        shortage = self.model.shortage_A
+        x, y, shortage = self.own_market_state()
 
         user_gap = max(0.0, p.target_share - x)
         merchant_gap = max(0.0, p.target_share - y)
 
-        if getattr(p, "targeting_enabled", True):
+        if getattr(p, "targeting_enabled", True) and getattr(p, "targeted", True):
             user_need = user_gap + 0.05
             merchant_need = merchant_gap + 1.5 * shortage + 0.05
         else:
             user_need = 1.0
             merchant_need = 1.0
 
-        total_need = user_need + merchant_need
+        total_need = max(user_need + merchant_need, 1e-12)
 
         subsidy_budget = 0.60 * B
         quality_budget = 0.40 * B
@@ -266,9 +274,7 @@ class PlatformAgent(mesa.Agent):
             self.user_invest = 0.0
             self.merchant_invest = 0.0
 
-
     def pure_quality_strategy(self):
-    
         p = self.model.params
 
         B = getattr(p, "budget", getattr(p, "total_budget", 0.8))
@@ -286,27 +292,23 @@ class PlatformAgent(mesa.Agent):
     def dynamic_strategy(self):
         """
         动态策略：
-        根据当前用户份额、商户份额和供给不足程度分配预算。
+        根据自身用户份额、商户份额和供给不足程度分配预算。
         """
         p = self.model.params
 
-        x = self.model.user_share_A
-        y = self.model.merchant_share_A
-        shortage = self.model.shortage_A
+        x, y, shortage = self.own_market_state()
 
         user_gap = max(0.0, p.target_share - x)
         merchant_gap = max(0.0, p.target_share - y)
 
-        # 供给不足时，更偏向商户侧扶持
         user_need = user_gap + 0.05
         merchant_need = merchant_gap + 1.5 * shortage + 0.05
+        total_need = max(user_need + merchant_need, 1e-12)
 
-        total_need = user_need + merchant_need
+        B = getattr(p, "dynamic_budget", getattr(p, "budget", 0.8))
+        user_budget = B * user_need / total_need
+        merchant_budget = B * merchant_need / total_need
 
-        user_budget = p.dynamic_budget * user_need / total_need
-        merchant_budget = p.dynamic_budget * merchant_need / total_need
-
-        # 前期主要补贴，后期转为质量投资
         if x < 0.65 or y < 0.65:
             self.user_subsidy = user_budget
             self.merchant_subsidy = merchant_budget
@@ -325,9 +327,12 @@ class PlatformAgent(mesa.Agent):
 
         qmax = getattr(p, "qmax", getattr(p, "q_max", 3.0))
 
+        eff_user = getattr(p, "invest_eff_user", getattr(p, "invest_eff_u", 0.05))
+        eff_merchant = getattr(p, "invest_eff_merchant", getattr(p, "invest_eff_m", 0.05))
+
         self.user_quality = np.clip(
             self.user_quality
-            + p.invest_eff_user * self.user_invest
+            + eff_user * self.user_invest
             - p.quality_decay * self.user_quality,
             0.0,
             qmax,
@@ -335,11 +340,12 @@ class PlatformAgent(mesa.Agent):
 
         self.merchant_quality = np.clip(
             self.merchant_quality
-            + p.invest_eff_merchant * self.merchant_invest
+            + eff_merchant * self.merchant_invest
             - p.quality_decay * self.merchant_quality,
             0.0,
             qmax,
         )
+
     def update_profit(self):
         p = self.model.params
 
@@ -350,26 +356,36 @@ class PlatformAgent(mesa.Agent):
             user_share = 1.0 - self.model.user_share_A
             merchant_share = 1.0 - self.model.merchant_share_A
 
-        revenue = (
-            p.revenue_user * user_share
-            + p.revenue_merchant * merchant_share
-        )
+        if getattr(p, "use_report_profit", True):
+            # 报告口径：
+            # pi = mu * u * m - subsidy_cost - investment_cost
+            # 每期总预算 B 会被策略分配到 user_subsidy / merchant_subsidy / user_invest / merchant_invest，
+            # 因而每期总成本约等于这些动作强度之和。
+            mu = getattr(p, "profit_mu", 10.0)
 
-        subsidy_cost = (
-            p.cost_user_subsidy * self.user_subsidy * user_share
-            + p.cost_merchant_subsidy * self.merchant_subsidy * merchant_share
-        )
+            revenue = mu * user_share * merchant_share
+            subsidy_cost = max(self.user_subsidy, 0.0) + max(self.merchant_subsidy, 0.0)
+            invest_cost = max(self.user_invest, 0.0) + max(self.merchant_invest, 0.0)
+        else:
+            revenue = (
+                p.revenue_user * user_share
+                + p.revenue_merchant * merchant_share
+            )
 
-        invest_cost = (
-            p.cost_invest_user * self.user_invest
-            + p.cost_invest_merchant * self.merchant_invest
-        )
+            subsidy_cost = (
+                p.cost_user_subsidy * self.user_subsidy * user_share
+                + p.cost_merchant_subsidy * self.merchant_subsidy * merchant_share
+            )
+
+            invest_cost = (
+                p.cost_invest_user * self.user_invest
+                + p.cost_invest_merchant * self.merchant_invest
+            )
 
         profit = revenue - subsidy_cost - invest_cost
 
         discount = getattr(p, "discount", 0.98)
         discount_weight = discount ** self.model.current_step
-
 
         self.cum_revenue += revenue
         self.cum_subsidy_cost += subsidy_cost

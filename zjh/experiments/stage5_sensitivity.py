@@ -3,34 +3,18 @@ Stage 5: 参数敏感性与临界条件
 
 本文件对应实验报告 5.7 节“参数敏感性与临界条件”。
 
-注意：
-1. 报告中的策略实验设平台 A 初始占优，平台 B 为挑战者。
-2. 为了不大改原有 simulate_path 的接口，本文件把代码中的 x,y 理解为“被补贴的挑战者平台份额”。
-   因此初始份额设为 X0_CHALLENGER = Y0_CHALLENGER = 0.2，
-   对应报告中的平台 B 初始份额为 0.2。
-3. 本阶段不再重复做：
-   - 网络效应临界曲线；
-   - 服务质量突破阈值；
-   - 固定预算补贴分配；
-   - 阶段性补贴退出。
-   这些内容已经分别对应报告 5.2、5.3、5.4。
-4. 本阶段只做：
-   - 非对称网络效应下的补贴方向；
-   - 最低有效补贴强度；
-   - 供给不足惩罚敏感性；
-   - 服务质量投资效率与衰减率敏感性；
-   - 临界条件汇总表。
+
 """
 
 from __future__ import annotations
 
 import os
 from typing import Any
-from src.config import Params
-
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+from src.config import Params
 from experiments.report_common import (
     ensure_dir,
     setup_matplotlib,
@@ -40,13 +24,12 @@ from experiments.report_common import (
     get_x,
     get_y,
     get_profit,
-    get_shortage,
+    get_shortage_B,
     get_quality,
     combined_share,
     platform_state,
-    static_policy,
+    static_policy_B,
 )
-
 
 
 # ============================================================
@@ -55,21 +38,18 @@ from experiments.report_common import (
 
 DT = 0.05
 
-# 报告中：平台 A 初始占优 x0=y0=0.8，平台 B 为挑战者。
-# 本代码中 x,y 表示“被补贴的挑战者平台份额”，所以初始为 0.2。
-X0_CHALLENGER = 0.2
-Y0_CHALLENGER = 0.2
+# 平台 A 初始占优；平台 B 为挑战者。
+X0_A = 0.8
+Y0_A = 0.8
 
 T_DEFAULT = 200.0
 T_QUALITY = 300.0
 
-# 报告中的中等、强网络效应
 MEDIUM_ALPHA = 0.8
 MEDIUM_BETA = 0.8
 STRONG_ALPHA = 1.5
 STRONG_BETA = 1.5
 
-# stage5 中使用的非对称网络效应场景
 ASYMMETRIC_SCENARIOS = [
     ("对称强网络效应", 1.2, 1.2),
     ("用户更依赖商户", 1.6, 0.5),
@@ -77,24 +57,35 @@ ASYMMETRIC_SCENARIOS = [
     ("极强锁定市场", 1.8, 1.8),
 ]
 
-# 报告供给不足参数
 N_U = 1000
 N_M = 50
 RHO = 10.0
 EPS = 1e-6
 
-# 报告服务质量投资参数
 LAMBDA_Q_BASE = 0.05
 D_BASE = 0.01
 Q_MAX = 3.0
 
-# 报告策略预算
 BUDGET = 0.8
-
-# 贴现因子；若 simulate_path 已经内部计算 cum_profit，这个参数只用于记录说明
 DISCOUNT = 0.98
 
 
+def _final_B_from_result(result):
+    """由模型输出的 A 份额反推出平台 B 最终份额。"""
+    final_A_u = get_x(result)
+    final_A_m = get_y(result)
+    final_B_u = 1.0 - final_A_u
+    final_B_m = 1.0 - final_A_m
+    final_B_avg = combined_share(final_B_u, final_B_m)
+    return final_A_u, final_A_m, final_B_u, final_B_m, final_B_avg
+
+
+def _quality_B_from_result(result) -> float:
+    """
+    model.py 中 q_u/q_m 表示平台 A 相对平台 B 的质量优势。
+    平台 B 的质量优势/质量存量用 -q_u 表示。
+    """
+    return -get_quality(result)
 
 
 # ============================================================
@@ -105,9 +96,9 @@ def experiment_asymmetric_subsidy_direction(output_dir: str) -> None:
     """
     分析 alpha != beta 时，用户补贴、商户补贴、均衡补贴的效果差异。
 
-    目的：
-    - alpha > beta：用户更依赖商户，预期商户补贴更有效；
-    - beta > alpha：商户更依赖用户，预期用户补贴更有效。
+    预期：
+    - alpha > beta：用户更依赖商户，商户补贴更有效；
+    - beta > alpha：商户更依赖用户，用户补贴更有效。
     """
     out = os.path.join(output_dir, "exp1_asymmetric_subsidy_direction")
     ensure_dir(out)
@@ -128,23 +119,18 @@ def experiment_asymmetric_subsidy_direction(output_dir: str) -> None:
 
     for scenario_name, alpha, beta in scenarios:
         for strategy_name, (sub_u, sub_m) in strategies.items():
-            params = make_params(
-                alpha=alpha,
-                beta=beta,
-                discount=DISCOUNT,
-            )
+            params = make_params(alpha=alpha, beta=beta, discount=DISCOUNT)
 
             result = call_simulate(
-                X0_CHALLENGER,
-                Y0_CHALLENGER,
+                X0_A,
+                Y0_A,
                 params,
                 T=T_DEFAULT,
                 dt=DT,
-                policy=static_policy(sub_u, sub_m, 0.0),
+                policy=static_policy_B(sub_u, sub_m, 0.0),
             )
 
-            final_u = get_x(result)
-            final_m = get_y(result)
+            final_A_u, final_A_m, final_B_u, final_B_m, final_B_avg = _final_B_from_result(result)
             profit = get_profit(result)
 
             rows.append({
@@ -154,19 +140,19 @@ def experiment_asymmetric_subsidy_direction(output_dir: str) -> None:
                 "strategy": strategy_name,
                 "subsidy_user": sub_u,
                 "subsidy_merchant": sub_m,
-                "final_B_user_share": final_u,
-                "final_B_merchant_share": final_m,
-                "final_B_average_share": combined_share(final_u, final_m),
+                "final_A_user_share": final_A_u,
+                "final_A_merchant_share": final_A_m,
+                "final_B_user_share": final_B_u,
+                "final_B_merchant_share": final_B_m,
+                "final_B_average_share": final_B_avg,
                 "profit": profit,
-                "state": platform_state(final_u, final_m),
+                "state": platform_state(final_B_u, final_B_m),
             })
 
     save_rows_csv(rows, os.path.join(out, "asymmetric_subsidy_direction.csv"))
 
-    # 绘图：不同场景下各策略利润
     scenario_names = [s[0] for s in scenarios]
     strategy_names = list(strategies.keys())
-
     x = np.arange(len(scenario_names))
     width = 0.24
 
@@ -174,14 +160,9 @@ def experiment_asymmetric_subsidy_direction(output_dir: str) -> None:
     for idx, strategy_name in enumerate(strategy_names):
         values = []
         for scenario_name in scenario_names:
-            match = [
-                r for r in rows
-                if r["scenario"] == scenario_name and r["strategy"] == strategy_name
-            ]
+            match = [r for r in rows if r["scenario"] == scenario_name and r["strategy"] == strategy_name]
             values.append(match[0]["profit"] if match else np.nan)
-
         plt.bar(x + (idx - 1) * width, values, width=width, label=strategy_name)
-
     plt.xticks(x, scenario_names)
     plt.ylabel("累计利润 / 贴现利润")
     plt.title("阶段5-实验1：非对称网络效应下的补贴方向比较")
@@ -191,19 +172,13 @@ def experiment_asymmetric_subsidy_direction(output_dir: str) -> None:
     plt.savefig(os.path.join(out, "asymmetric_subsidy_profit_bar.png"), dpi=300)
     plt.close()
 
-    # 绘图：最终平均份额
     plt.figure(figsize=(9, 5))
     for idx, strategy_name in enumerate(strategy_names):
         values = []
         for scenario_name in scenario_names:
-            match = [
-                r for r in rows
-                if r["scenario"] == scenario_name and r["strategy"] == strategy_name
-            ]
+            match = [r for r in rows if r["scenario"] == scenario_name and r["strategy"] == strategy_name]
             values.append(match[0]["final_B_average_share"] if match else np.nan)
-
         plt.bar(x + (idx - 1) * width, values, width=width, label=strategy_name)
-
     plt.xticks(x, scenario_names)
     plt.ylabel(r"挑战者最终平均份额 $L_B$")
     plt.title("阶段5-实验1：非对称网络效应下的最终份额比较")
@@ -221,12 +196,7 @@ def experiment_asymmetric_subsidy_direction(output_dir: str) -> None:
 
 def experiment_minimum_effective_subsidy(output_dir: str) -> None:
     """
-    搜索挑战者平台满足 final_user >= 0.8 且 final_merchant >= 0.8
-    所需的最低补贴组合。
-
-    目标：
-        min b_user + b_merchant
-        s.t. u_B(T) >= 0.8, m_B(T) >= 0.8
+    搜索挑战者平台满足 final_user >= 0.8 且 final_merchant >= 0.8 所需的最低补贴组合。
     """
     out = os.path.join(output_dir, "exp2_minimum_effective_subsidy")
     ensure_dir(out)
@@ -238,31 +208,24 @@ def experiment_minimum_effective_subsidy(output_dir: str) -> None:
 
     for scenario_name, alpha, beta in ASYMMETRIC_SCENARIOS:
         best: dict[str, Any] | None = None
-
         share_grid = np.zeros((len(subsidy_values), len(subsidy_values)))
 
         for i, b_m in enumerate(subsidy_values):
             for j, b_u in enumerate(subsidy_values):
-                params = make_params(
-                    alpha=alpha,
-                    beta=beta,
-                    discount=DISCOUNT,
-                )
+                params = make_params(alpha=alpha, beta=beta, discount=DISCOUNT)
 
                 result = call_simulate(
-                    X0_CHALLENGER,
-                    Y0_CHALLENGER,
+                    X0_A,
+                    Y0_A,
                     params,
                     T=T_DEFAULT,
                     dt=DT,
-                    policy=static_policy(b_u, b_m, 0.0),
+                    policy=static_policy_B(float(b_u), float(b_m), 0.0),
                 )
 
-                final_u = get_x(result)
-                final_m = get_y(result)
-                avg_share = combined_share(final_u, final_m)
+                final_A_u, final_A_m, final_B_u, final_B_m, avg_share = _final_B_from_result(result)
                 total_subsidy = float(b_u + b_m)
-                success = int(final_u >= 0.8 and final_m >= 0.8)
+                success = int(final_B_u >= 0.8 and final_B_m >= 0.8)
 
                 share_grid[i, j] = avg_share
 
@@ -273,35 +236,31 @@ def experiment_minimum_effective_subsidy(output_dir: str) -> None:
                     "b_user": float(b_u),
                     "b_merchant": float(b_m),
                     "total_subsidy": total_subsidy,
-                    "final_B_user_share": final_u,
-                    "final_B_merchant_share": final_m,
+                    "final_A_user_share": final_A_u,
+                    "final_A_merchant_share": final_A_m,
+                    "final_B_user_share": final_B_u,
+                    "final_B_merchant_share": final_B_m,
                     "final_B_average_share": avg_share,
                     "success": success,
-                    "state": platform_state(final_u, final_m),
+                    "state": platform_state(final_B_u, final_B_m),
                 }
                 rows.append(row)
 
                 if success:
                     if best is None:
                         best = row
-                    else:
-                        if total_subsidy < best["total_subsidy"]:
+                    elif total_subsidy < best["total_subsidy"]:
+                        best = row
+                    elif np.isclose(total_subsidy, best["total_subsidy"]):
+                        if avg_share > best["final_B_average_share"]:
                             best = row
-                        elif np.isclose(total_subsidy, best["total_subsidy"]):
-                            # 若总补贴相同，选择平均份额更高的组合
-                            if avg_share > best["final_B_average_share"]:
-                                best = row
 
-        # 保存每个场景的热力图
         plt.figure(figsize=(7, 5.8))
         im = plt.imshow(
             share_grid,
             origin="lower",
             aspect="auto",
-            extent=[
-                subsidy_values.min(), subsidy_values.max(),
-                subsidy_values.min(), subsidy_values.max(),
-            ],
+            extent=[subsidy_values.min(), subsidy_values.max(), subsidy_values.min(), subsidy_values.max()],
             vmin=0,
             vmax=1,
             cmap="viridis",
@@ -343,7 +302,7 @@ def experiment_minimum_effective_subsidy(output_dir: str) -> None:
                 "min_total_subsidy": np.nan,
                 "best_b_user": np.nan,
                 "best_b_merchant": np.nan,
-                "main_direction": "未在扫描范围内成功",
+                "main_direction": "未达到阈值",
                 "final_B_user_share": np.nan,
                 "final_B_merchant_share": np.nan,
                 "final_B_average_share": np.nan,
@@ -352,7 +311,6 @@ def experiment_minimum_effective_subsidy(output_dir: str) -> None:
     save_rows_csv(rows, os.path.join(out, "minimum_effective_subsidy_grid.csv"))
     save_rows_csv(summary, os.path.join(out, "minimum_effective_subsidy_summary.csv"))
 
-    # 汇总柱状图
     plt.figure(figsize=(9, 5))
     labels = [r["scenario"] for r in summary]
     values = [r["min_total_subsidy"] for r in summary]
@@ -373,12 +331,6 @@ def experiment_minimum_effective_subsidy(output_dir: str) -> None:
 def experiment_shortage_penalty_sensitivity(output_dir: str) -> None:
     """
     扫描供给不足惩罚强度 theta，比较不同补贴策略的稳健性。
-
-    报告参数：
-        N_U = 1000
-        N_M = 50
-        rho = 10.0
-        budget = 0.8
     """
     out = os.path.join(output_dir, "exp3_shortage_penalty_sensitivity")
     ensure_dir(out)
@@ -411,17 +363,16 @@ def experiment_shortage_penalty_sensitivity(output_dir: str) -> None:
             )
 
             result = call_simulate(
-                X0_CHALLENGER,
-                Y0_CHALLENGER,
+                X0_A,
+                Y0_A,
                 params,
                 T=T_DEFAULT,
                 dt=DT,
-                policy=static_policy(sub_u, sub_m, inv),
+                policy=static_policy_B(sub_u, sub_m, inv),
             )
 
-            final_u = get_x(result)
-            final_m = get_y(result)
-            max_shortage, avg_shortage = get_shortage(result)
+            final_A_u, final_A_m, final_B_u, final_B_m, final_B_avg = _final_B_from_result(result)
+            max_shortage, avg_shortage = get_shortage_B(result)
             profit = get_profit(result)
 
             rows.append({
@@ -429,25 +380,23 @@ def experiment_shortage_penalty_sensitivity(output_dir: str) -> None:
                 "strategy": strategy_name,
                 "subsidy_user": sub_u,
                 "subsidy_merchant": sub_m,
-                "final_B_user_share": final_u,
-                "final_B_merchant_share": final_m,
-                "final_B_average_share": combined_share(final_u, final_m),
+                "final_A_user_share": final_A_u,
+                "final_A_merchant_share": final_A_m,
+                "final_B_user_share": final_B_u,
+                "final_B_merchant_share": final_B_m,
+                "final_B_average_share": final_B_avg,
                 "max_shortage": max_shortage,
                 "avg_shortage": avg_shortage,
                 "profit": profit,
-                "state": platform_state(final_u, final_m),
+                "state": platform_state(final_B_u, final_B_m),
             })
 
     save_rows_csv(rows, os.path.join(out, "shortage_penalty_sensitivity.csv"))
 
-    # 贴现利润随 theta 变化
     plt.figure(figsize=(8, 5))
     for strategy_name in strategies:
         sub = [r for r in rows if r["strategy"] == strategy_name]
-        xs = [r["theta"] for r in sub]
-        ys = [r["profit"] for r in sub]
-        plt.plot(xs, ys, marker="o", label=strategy_name)
-
+        plt.plot([r["theta"] for r in sub], [r["profit"] for r in sub], marker="o", label=strategy_name)
     plt.xlabel(r"供给不足惩罚强度 $\theta$")
     plt.ylabel("累计利润 / 贴现利润")
     plt.title("阶段5-实验3：供给不足惩罚强度对利润的影响")
@@ -457,14 +406,10 @@ def experiment_shortage_penalty_sensitivity(output_dir: str) -> None:
     plt.savefig(os.path.join(out, "shortage_penalty_profit_lines.png"), dpi=300)
     plt.close()
 
-    # 最终平均份额随 theta 变化
     plt.figure(figsize=(8, 5))
     for strategy_name in strategies:
         sub = [r for r in rows if r["strategy"] == strategy_name]
-        xs = [r["theta"] for r in sub]
-        ys = [r["final_B_average_share"] for r in sub]
-        plt.plot(xs, ys, marker="o", label=strategy_name)
-
+        plt.plot([r["theta"] for r in sub], [r["final_B_average_share"] for r in sub], marker="o", label=strategy_name)
     plt.xlabel(r"供给不足惩罚强度 $\theta$")
     plt.ylabel(r"挑战者最终平均份额 $L_B$")
     plt.title("阶段5-实验3：供给不足惩罚强度对最终份额的影响")
@@ -475,14 +420,10 @@ def experiment_shortage_penalty_sensitivity(output_dir: str) -> None:
     plt.savefig(os.path.join(out, "shortage_penalty_share_lines.png"), dpi=300)
     plt.close()
 
-    # 最大供给不足随 theta 变化
     plt.figure(figsize=(8, 5))
     for strategy_name in strategies:
         sub = [r for r in rows if r["strategy"] == strategy_name]
-        xs = [r["theta"] for r in sub]
-        ys = [r["max_shortage"] for r in sub]
-        plt.plot(xs, ys, marker="o", label=strategy_name)
-
+        plt.plot([r["theta"] for r in sub], [r["max_shortage"] for r in sub], marker="o", label=strategy_name)
     plt.xlabel(r"供给不足惩罚强度 $\theta$")
     plt.ylabel("最大供给不足惩罚")
     plt.title("阶段5-实验3：供给不足惩罚强度对最大短缺的影响")
@@ -499,24 +440,18 @@ def experiment_shortage_penalty_sensitivity(output_dir: str) -> None:
 
 def _dynamic_quality_policy(t: float, state, p: Params):
     """
-    报告 5.6 中的动态策略。
-
-    若实际用户–商户比例过高，说明供给不足强，偏向商户补贴；
-    若用户侧不足，偏向用户补贴；
-    否则提高质量投资比例。
-
-    兼容两类 state：
-    1. dict: {"x": ..., "y": ...}
-    2. numpy.ndarray/list: [x, y, q_u, q_m]
+    报告 5.6 中的动态策略，基于平台 B 的用户-商户比例进行分配。
     """
     if isinstance(state, dict):
-        x = float(state.get("x", state.get("u", X0_CHALLENGER)))
-        y = float(state.get("y", state.get("m", Y0_CHALLENGER)))
+        x_A = float(state.get("x", state.get("u", X0_A)))
+        y_A = float(state.get("y", state.get("m", Y0_A)))
     else:
-        x = float(state[0])
-        y = float(state[1])
+        x_A = float(state[0])
+        y_A = float(state[1])
 
-    ratio = N_U * x / (N_M * y + EPS)
+    x_B = 1.0 - x_A
+    y_B = 1.0 - y_A
+    ratio = N_U * x_B / (N_M * y_B + EPS)
 
     if ratio > RHO:
         su, sm, inv = 0.2 * BUDGET, 0.6 * BUDGET, 0.2 * BUDGET
@@ -526,23 +461,16 @@ def _dynamic_quality_policy(t: float, state, p: Params):
         su, sm, inv = 0.3 * BUDGET, 0.3 * BUDGET, 0.4 * BUDGET
 
     return {
-        "ds_u": su,
-        "ds_m": sm,
-        "inv_u": inv,
-        "inv_m": inv,
+        "ds_u_B": su,
+        "ds_m_B": sm,
+        "inv_u_B": inv,
+        "inv_m_B": inv,
     }
 
 
 def experiment_quality_investment_sensitivity(output_dir: str) -> None:
     """
     扫描服务质量投资效率 lambda_q 与质量衰减率 d。
-
-    报告基准：
-        lambda_q = 0.05
-        d = 0.01
-        qmax = 3.0
-        budget = 0.8
-        T = 300
     """
     out = os.path.join(output_dir, "exp4_quality_investment_sensitivity")
     ensure_dir(out)
@@ -557,7 +485,6 @@ def experiment_quality_investment_sensitivity(output_dir: str) -> None:
     }
 
     strategy_names = ["贪心策略", "长期策略", "动态策略", "纯质量投资"]
-
     rows: list[dict[str, Any]] = []
 
     for lambda_q in lambda_q_values:
@@ -567,7 +494,7 @@ def experiment_quality_investment_sensitivity(output_dir: str) -> None:
                     policy = _dynamic_quality_policy
                 else:
                     su, sm, inv = fixed_strategies[strategy_name]
-                    policy = static_policy(su, sm, inv)
+                    policy = static_policy_B(su, sm, inv)
 
                 params = make_params(
                     alpha=MEDIUM_ALPHA,
@@ -587,39 +514,39 @@ def experiment_quality_investment_sensitivity(output_dir: str) -> None:
                 )
 
                 result = call_simulate(
-                    X0_CHALLENGER,
-                    Y0_CHALLENGER,
+                    X0_A,
+                    Y0_A,
                     params,
                     T=T_QUALITY,
                     dt=DT,
                     policy=policy,
                 )
 
-                final_u = get_x(result)
-                final_m = get_y(result)
-                final_q = get_quality(result)
-                max_shortage, avg_shortage = get_shortage(result)
+                final_A_u, final_A_m, final_B_u, final_B_m, final_B_avg = _final_B_from_result(result)
+                final_q_B = _quality_B_from_result(result)
+                max_shortage, avg_shortage = get_shortage_B(result)
                 profit = get_profit(result)
+
                 rows.append({
                     "lambda_q": float(lambda_q),
                     "decay": float(decay),
                     "strategy": strategy_name,
-                    "final_B_user_share": final_u,
-                    "final_B_merchant_share": final_m,
-                    "final_B_average_share": combined_share(final_u, final_m),
-                    "final_quality": final_q,
+                    "final_A_user_share": final_A_u,
+                    "final_A_merchant_share": final_A_m,
+                    "final_B_user_share": final_B_u,
+                    "final_B_merchant_share": final_B_m,
+                    "final_B_average_share": final_B_avg,
+                    "final_quality_B": final_q_B,
                     "max_shortage": max_shortage,
                     "avg_shortage": avg_shortage,
                     "profit": profit,
-                    "state": platform_state(final_u, final_m),
+                    "state": platform_state(final_B_u, final_B_m),
                 })
 
     save_rows_csv(rows, os.path.join(out, "quality_investment_sensitivity.csv"))
 
-    # 为每种策略画利润热力图
     for strategy_name in strategy_names:
         grid = np.full((len(decay_values), len(lambda_q_values)), np.nan)
-
         for i, decay in enumerate(decay_values):
             for j, lambda_q in enumerate(lambda_q_values):
                 match = [
@@ -636,10 +563,7 @@ def experiment_quality_investment_sensitivity(output_dir: str) -> None:
             grid,
             origin="lower",
             aspect="auto",
-            extent=[
-                min(lambda_q_values), max(lambda_q_values),
-                min(decay_values), max(decay_values),
-            ],
+            extent=[min(lambda_q_values), max(lambda_q_values), min(decay_values), max(decay_values)],
             cmap="viridis",
         )
         plt.colorbar(im, label="累计利润 / 贴现利润")
@@ -655,13 +579,9 @@ def experiment_quality_investment_sensitivity(output_dir: str) -> None:
 
         plt.tight_layout()
         safe_name = strategy_name.replace("/", "_").replace("\\", "_")
-        plt.savefig(
-            os.path.join(out, f"quality_investment_profit_heatmap_{safe_name}.png"),
-            dpi=300,
-        )
+        plt.savefig(os.path.join(out, f"quality_investment_profit_heatmap_{safe_name}.png"), dpi=300)
         plt.close()
 
-    # 基准参数下各策略柱状图
     baseline_rows = [
         r for r in rows
         if np.isclose(r["lambda_q"], LAMBDA_Q_BASE)
@@ -688,7 +608,6 @@ def experiment_quality_investment_sensitivity(output_dir: str) -> None:
 def write_critical_condition_summary(output_dir: str) -> None:
     """
     写出报告 5.7 中使用的临界条件汇总表。
-
     这些数值来自前面阶段的实验结论，不在 stage5 中重复仿真。
     """
     out = os.path.join(output_dir, "exp5_critical_condition_summary")
@@ -779,9 +698,6 @@ def write_critical_condition_summary(output_dir: str) -> None:
 def run_stage5(output_root: str) -> None:
     """
     stage5 总入口。
-
-    输出目录：
-        outputs_full_logit/stage5_sensitivity/
     """
     setup_matplotlib()
 
